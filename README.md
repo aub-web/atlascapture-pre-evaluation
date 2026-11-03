@@ -71,6 +71,13 @@ You can also offer "Sign in with Google" alongside email codes. The same access 
 
 You can add projects besides EgoExo in `src/projects.js`. The form checklist, media slots and QC checks are all generated from that file.
 
-## Deploying
+## Deploying (Render)
 
-Serve it over HTTPS, configure SMTP, set `APP_URL` to the https URL, and make sure `DEV_LOGIN` is not set.
+`render.yaml` sets up a Render web service (Singapore, Starter plan) with a 1 GB persistent disk at `/var/data` for the database and uploaded photos. The free plan has no disk, so data would be wiped on every deploy.
+
+1. In Render: **New → Blueprint**, connect GitHub, pick this repo, and apply.
+2. When asked, fill in `SMTP_USER`, `SMTP_PASS` (Gmail App Password), `APP_URL` (e.g. `https://studio-setup-qc.onrender.com`) and optionally `SITE_PASSWORD`.
+3. Service → **Environment → Secret Files**: add `team.js` with the contents of your local `config/team.js` (the app reads it from `/etc/secrets/team.js`).
+4. Deploy. Every push to `main` redeploys automatically.
+
+Make sure `DEV_LOGIN` is not set in production.

@@ -68,6 +68,9 @@ function parseCookies(header = '') {
 
 const app = express();
 
+// Health check for the host (registered before the site password so it always answers).
+app.get('/healthz', (req, res) => res.type('text').send('ok'));
+
 // Optional shared password in front of the whole site, for test deployments shared by link.
 // Enabled by setting SITE_PASSWORD. Uses a plain form + signed cookie rather than HTTP Basic auth,
 // because in-app browsers (Slack, WeChat, Messenger) never show the Basic auth dialog.
