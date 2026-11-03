@@ -1,6 +1,6 @@
 'use strict';
 
-const { db, now } = require('./db');
+const { q, run, now } = require('./db');
 
 // In-app notifications are always created. Email is sent too when SMTP is fully configured:
 //   SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS, MAIL_FROM, APP_URL
@@ -53,25 +53,23 @@ async function sendMail({ to, bcc, subject, text }) {
   }
 }
 
-const insert = db.prepare(
-  'INSERT INTO notifications (user_id, ticket_id, type, message, created_at) VALUES (?, ?, ?, ?, ?)'
-);
-
 // `link` is an app path like '/t/12' or '/team'; defaults to the ticket when there is one.
-function notify(userIds, { ticketId, type, message, detail, link }) {
+// Awaited by callers: on serverless hosts work left running after the response may never finish.
+async function notify(userIds, { ticketId, type, message, detail, link }) {
   const ids = [...new Set(userIds.filter(Boolean))];
+  if (!ids.length) return;
   const ts = now();
-  for (const id of ids) insert.run(id, ticketId ?? null, type, message, ts);
+  for (const id of ids) {
+    await run('INSERT INTO notifications (user_id, ticket_id, type, message, created_at) VALUES ($1, $2, $3, $4, $5)',
+      [id, ticketId ?? null, type, message, ts]);
+  }
 
-  if (!transport || !ids.length) return;
-  const recipients = db
-    .prepare(`SELECT email FROM users WHERE id IN (${ids.map(() => '?').join(',')}) AND email IS NOT NULL`)
-    .all(...ids)
-    .map((r) => r.email);
+  if (!transport) return;
+  const recipients = (await q('SELECT email FROM users WHERE id = ANY($1) AND email IS NOT NULL', [ids])).map((r) => r.email);
   if (!recipients.length) return;
 
   const url = appLink(link || (ticketId ? `/t/${ticketId}` : '/'));
-  sendMail({ bcc: recipients, subject: message, text: [message, detail, url && `Open: ${url}`].filter(Boolean).join('\n\n') });
+  await sendMail({ bcc: recipients, subject: message, text: [message, detail, url && `Open: ${url}`].filter(Boolean).join('\n\n') });
 }
 
 module.exports = { notify, sendMail, verifyMail, mailEnabled, appLink };

@@ -232,7 +232,7 @@ table.team td:first-child { min-width: 200px; }
 table.team .sub.email { overflow-wrap: anywhere; }
 table.team .signin-cell { white-space: nowrap; }
 table.team .signin-cell .btn { height: 28px; padding: 0 10px; margin-left: 4px; }
-@media (max-width: 1100px) { .team-layout { grid-template-columns: 1fr; } .team-layout > form { order: -1; } }
+@media (max-width: 1100px) { .team-layout { grid-template-columns: 1fr; } .team-layout > .team-side { order: -1; } }
 @media (max-width: 720px) {
   table.team { min-width: 0; }
   table.team td:first-child { min-width: 0; }
@@ -414,3 +414,9 @@ table.tickets { width: 100%; border-collapse: collapse; }
   .tickets td.hide-sm { display: none; }
   .dl { grid-template-columns: 110px 1fr; }
 }
+
+/* Site password form (shown in the page when the API asks for it) */
+.site-gate { max-width: 380px; margin: 12vh auto 0; padding: 28px 24px; text-align: center; display: grid; gap: 12px; }
+.site-gate h1 { font-size: 20px; }
+.site-gate p { margin: 0; }
+.site-gate input { height: 44px; }

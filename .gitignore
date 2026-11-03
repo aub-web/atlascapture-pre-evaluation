@@ -3,3 +3,7 @@ data/
 .env
 # Real team roster (names + emails) stays out of the repo; see config/team.example.js
 config/team.js
+config/team.json
+# Netlify settings to import (contains secrets)
+config/netlify.env
+.netlify/

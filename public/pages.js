@@ -271,11 +271,9 @@ async function renderQuickSubmit(view, projectId) {
     errors.push(...fields.validate());
     if (errors.length) return toast(errors[0], 'error');
 
-    const fd = new FormData();
-    for (const name of ['submitterId', 'splId', 'taskName', 'scene', 'businessType']) fd.append(name, form[name].value.trim());
-    fd.append('project', project.id);
-    fields.appendTo(fd);
-    const result = await submitWithProgress($('button[type=submit]', form), $('.progress', form), '/api/public/submissions', fd, 'Submit for QC review');
+    const values = Object.fromEntries(['submitterId', 'splId', 'taskName', 'scene', 'businessType'].map((n) => [n, form[n].value.trim()]));
+    values.project = project.id;
+    const result = await submitWithProgress($('button[type=submit]', form), $('.progress', form), '/api/public/submissions', values, fields, 'Submit for QC review');
     if (result) {
       rememberSubmitter(form.submitterId.value);
       toast('Submitted — QC has been notified');
@@ -386,11 +384,8 @@ async function renderPublicTicket(view, id) {
     const who = $('#resubWho').value;
     const errors = [...(who ? [] : ['Choose who is resubmitting']), ...fields.validate()];
     if (errors.length) return toast(errors[0], 'error');
-    const fd = new FormData();
-    fd.append('submitterId', who);
-    fd.append('note', $('#resubNote').value);
-    fields.appendTo(fd);
-    const ok = await submitWithProgress($('#resubmitBtn'), $('.progress', $('#resubmitCard')), `/api/public/submissions/${t.id}/resubmit`, fd, 'Resubmit for QC review');
+    const ok = await submitWithProgress($('#resubmitBtn'), $('.progress', $('#resubmitCard')), `/api/public/submissions/${t.id}/resubmit`,
+      { submitterId: who, note: $('#resubNote').value }, fields, 'Resubmit for QC review');
     if (ok) {
       rememberSubmitter(who);
       toast('Resubmitted — QC has been notified');
@@ -429,6 +424,7 @@ async function renderTeam(view) {
       </div>`).join('')}</div></div>` : ''}
     <div class="team-layout">
       <div class="card" id="teamList"></div>
+      <div class="stack team-side">
       <form class="card" id="addUser" novalidate>
         <div class="card-head"><h2>Add a user</h2></div>
         <div class="card-body stack">
@@ -445,7 +441,38 @@ async function renderTeam(view) {
           <button class="btn btn-primary btn-lg" type="submit">${icon.plus} Add user</button>
         </div>
       </form>
+      ${isAdmin ? `<div class="card" id="importRoster">
+        <div class="card-head"><h2>Import roster</h2></div>
+        <div class="card-body stack">
+          <p class="muted small" style="margin:0">Upload <b>config/team.json</b> (made on your PC with <code>node scripts/export-roster.js</code>).
+            Matching people are updated by email, new people are added.</p>
+          <input type="file" accept=".json,application/json" name="file">
+          <label class="check" style="padding:9px 11px"><input type="checkbox" name="deactivate"><div class="small">Also deactivate roster people who aren't in this file</div></label>
+          <button class="btn" type="button" data-import>Import</button>
+        </div>
+      </div>` : ''}
+      </div>
     </div>`;
+
+  $('#importRoster [data-import]')?.addEventListener('click', async () => {
+    const box = $('#importRoster');
+    const file = $('input[name=file]', box).files[0];
+    if (!file) return toast('Choose the team.json file first', 'error');
+    let roster;
+    try {
+      roster = JSON.parse(await file.text());
+    } catch {
+      return toast("That file isn't valid JSON. Use config/team.json from the export script.", 'error');
+    }
+    try {
+      const r = await api('/api/team/import', { method: 'POST', body: { ...roster, deactivateMissing: $('input[name=deactivate]', box).checked } });
+      toast(`Roster imported: ${r.added} added, ${r.updated} updated${r.deactivated ? `, ${r.deactivated} deactivated` : ''}`);
+      state.meta = await api('/api/meta');
+      renderTeam(view);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
 
   $('#reqs')?.addEventListener('click', async (e) => {
     const card = e.target.closest('[data-req]');

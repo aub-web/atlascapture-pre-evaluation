@@ -57,6 +57,10 @@ async function api(path, opts = {}) {
     body: opts.body && !isForm ? JSON.stringify(opts.body) : opts.body,
   });
   const data = (res.headers.get('content-type') || '').includes('json') ? await res.json() : null;
+  if (res.status === 401 && data?.code === 'site_password') {
+    showSiteGate();
+    throw new Error('Access password required');
+  }
   if (res.status === 401 && !path.startsWith('/api/me') && !path.startsWith('/api/public')) {
     state.me = null;
     location.hash = '#/welcome';
@@ -65,20 +69,79 @@ async function api(path, opts = {}) {
   return data;
 }
 
-// XHR so large video uploads can show progress.
-function uploadForm(url, formData, onProgress) {
+// Shared site password (test deployments): shown in the page when the API asks for it.
+function showSiteGate() {
+  if ($('#siteGate')) return;
+  $('#header').hidden = true;
+  $('#view').innerHTML = `
+    <form id="siteGate" class="card site-gate" novalidate>
+      <h1>Studio Setup QC</h1>
+      <p class="muted">This is a test site. Enter the access password you were given.</p>
+      <input type="password" name="password" placeholder="Access password" autocomplete="current-password">
+      <button class="btn btn-primary btn-lg btn-block" type="submit">Continue</button>
+      <div class="login-error" hidden></div>
+    </form>`;
+  const form = $('#siteGate');
+  form.password.focus();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const res = await fetch('/site-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ password: form.password.value }),
+    });
+    if (res.ok) return location.reload();
+    const box = $('.login-error', form);
+    box.textContent = (await res.json().catch(() => null))?.error || "That password isn't right.";
+    box.hidden = false;
+  };
+}
+
+// Uploads go up in chunks (each request stays small enough for serverless hosts).
+function putChunk(url, blob, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', url);
+    xhr.open('PUT', url);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch {}
-      xhr.status < 300 ? resolve(data) : reject(new Error(data.error || 'Upload failed'));
+      xhr.status < 300 ? resolve(data) : reject(Object.assign(new Error(data.error || 'Upload failed'), { status: xhr.status }));
     };
     xhr.onerror = () => reject(new Error('Network error during upload'));
-    xhr.send(formData);
+    xhr.send(blob);
   });
+}
+
+// Uploads [{ slot, file, duration }] and returns [{ slot, uploadId }]. Each chunk is retried twice.
+async function uploadFiles(files, onProgress) {
+  const total = files.reduce((sum, f) => sum + f.file.size, 0) || 1;
+  let done = 0;
+  const result = [];
+  for (const f of files) {
+    const { uploadId, chunkSize, chunks } = await api('/api/uploads', {
+      method: 'POST',
+      body: { name: f.file.name, mime: f.file.type, size: f.file.size, duration: f.duration ?? null },
+    });
+    for (let n = 0; n < chunks; n++) {
+      const blob = f.file.slice(n * chunkSize, (n + 1) * chunkSize);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await putChunk(`/api/uploads/${uploadId}/${n}`, blob, (p) => onProgress((done + p * blob.size) / total));
+          break;
+        } catch (err) {
+          if (attempt >= 2 || (err.status && err.status < 500)) throw err;
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        }
+      }
+      done += blob.size;
+      onProgress(done / total);
+    }
+    await api(`/api/uploads/${uploadId}/complete`, { method: 'POST' });
+    result.push({ slot: f.slot, uploadId });
+  }
+  return result;
 }
 
 // ---------- State & router ----------
@@ -580,30 +643,34 @@ function mountSubmissionFields(root, project, prefill = {}) {
       }
       return errors;
     },
-    appendTo(fd) {
-      fd.append('boundarySize', $('[data-boundary]', root).value);
-      fd.append('checklist', JSON.stringify(Object.fromEntries($$('.check input', root).map((cb) => [cb.dataset.check, cb.checked]))));
-      fd.append('mediaType', mode);
-      if (mode === 'images') for (const s of project.mediaSlots) fd.append(s.key, slotFiles[s.key]);
-      else {
-        fd.append('video', videoFile);
-        fd.append('videoDuration', String(videoDuration));
-      }
+    values() {
+      return {
+        boundarySize: $('[data-boundary]', root).value,
+        checklist: Object.fromEntries($$('.check input', root).map((cb) => [cb.dataset.check, cb.checked])),
+        mediaType: mode,
+      };
+    },
+    files() {
+      return mode === 'images'
+        ? project.mediaSlots.map((s) => ({ slot: s.key, file: slotFiles[s.key] }))
+        : [{ slot: 'video', file: videoFile, duration: videoDuration }];
     },
   };
 }
 
-// Submit button + progress bar handling shared by New and Resubmit.
-async function submitWithProgress(btn, progressEl, url, fd, label) {
+// Uploads the media, then posts the submission. Shared by New, Resubmit and "Submit a photo".
+// `fields` are the form's own values; `sub` is the mounted submission fields.
+async function submitWithProgress(btn, progressEl, url, fields, sub, label) {
   btn.disabled = true;
   progressEl.hidden = false;
   const bar = $('div', progressEl);
   try {
-    const result = await uploadForm(url, fd, (p) => {
+    const media = await uploadFiles(sub.files(), (p) => {
       bar.style.width = `${Math.round(p * 100)}%`;
       btn.textContent = p < 1 ? `Uploading ${Math.round(p * 100)}%…` : 'Saving…';
     });
-    return result;
+    btn.textContent = 'Saving…';
+    return await api(url, { method: 'POST', body: { ...fields, ...sub.values(), media } });
   } catch (err) {
     toast(err.message, 'error');
     btn.disabled = false;
@@ -667,11 +734,9 @@ function renderNewTicket(view) {
     errors.push(...fields.validate());
     if (errors.length) return toast(errors[0], 'error');
 
-    const fd = new FormData();
-    for (const name of ['splId', 'taskName', 'scene', 'businessType', 'project']) fd.append(name, form[name].value.trim());
-    fields.appendTo(fd);
+    const values = Object.fromEntries(['splId', 'taskName', 'scene', 'businessType', 'project'].map((n) => [n, form[n].value.trim()]));
     const btn = $('button[type=submit]', form);
-    const result = await submitWithProgress(btn, $('.progress', form), '/api/tickets', fd, 'Submit for QC review');
+    const result = await submitWithProgress(btn, $('.progress', form), '/api/tickets', values, fields, 'Submit for QC review');
     if (result) {
       toast('Ticket submitted — QC has been notified');
       location.hash = `#/t/${result.id}`;
@@ -772,10 +837,8 @@ async function renderTicket(view, id) {
     $('#resubmitBtn').onclick = async () => {
       const errors = fields.validate();
       if (errors.length) return toast(errors[0], 'error');
-      const fd = new FormData();
-      fields.appendTo(fd);
-      fd.append('note', $('#resubNote').value);
-      const ok = await submitWithProgress($('#resubmitBtn'), $('.progress', card), `/api/tickets/${t.id}/resubmit`, fd, 'Resubmit for QC review');
+      const ok = await submitWithProgress($('#resubmitBtn'), $('.progress', card), `/api/tickets/${t.id}/resubmit`,
+        { note: $('#resubNote').value }, fields, 'Resubmit for QC review');
       if (ok) {
         toast('Resubmitted — QC has been notified');
         route();
@@ -817,11 +880,11 @@ function mediaGallery(items) {
   if (!items.length) return '<div class="empty">No media</div>';
   const video = items.find((m) => m.slot === 'video');
   if (video) {
-    return `<div class="gallery-video"><video controls preload="metadata" src="/media/${video.id}"></video>
+    return `<div class="gallery-video"><video controls preload="metadata" src="${esc(video.url)}"></video>
       <div class="muted small" style="margin-top:6px">${esc(video.original_name || 'Setup video')}${video.duration ? ` · ${fmtDuration(video.duration)}` : ''}</div></div>`;
   }
-  return `<div class="gallery">${items.map((m) => `<div class="tile ${m.slot === 'ego' ? 'ego' : ''}" data-src="/media/${m.id}" data-label="${esc(m.label)}">
-    <img src="/media/${m.id}" alt="${esc(m.label)} preview" loading="lazy"><span class="slot-label">${esc(m.label)}</span></div>`).join('')}</div>`;
+  return `<div class="gallery">${items.map((m) => `<div class="tile ${m.slot === 'ego' ? 'ego' : ''}" data-src="${esc(m.url)}" data-label="${esc(m.label)}">
+    <img src="${esc(m.url)}" alt="${esc(m.label)} preview" loading="lazy"><span class="slot-label">${esc(m.label)}</span></div>`).join('')}</div>`;
 }
 
 function bindLightbox(root) {

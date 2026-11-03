@@ -4,14 +4,16 @@ Pre-recording setup approval tool for the Studio QA/Capture team. Set Directors 
 
 ## Run it
 
-Requires Node.js 22.13+ (uses the built-in `node:sqlite`).
+Requires Node.js 22+.
 
 ```bash
 npm install
 npm start
 ```
 
-Copy `.env.example` to `.env`, fill in the email (SMTP) settings, then open http://localhost:3000.
+Copy `.env.example` to `.env`, fill in the email (SMTP) settings, then open http://localhost:3000. Locally the database is an embedded Postgres (PGlite) in `data/pg` and uploads go to `data/uploads`; nothing else needs installing.
+
+**How it's built:** static pages in `public/`, an Express API in `src/app.js` (run by `server.js` locally and by a Netlify Function online), Postgres for data, and chunked file storage for photos and videos (local disk, or Netlify Blobs online).
 
 ## Signing in and access
 
@@ -42,7 +44,7 @@ You can also offer "Sign in with Google" alongside email codes. The same access 
    Under **Authorized JavaScript origins**, add `http://localhost:3000` and your production URL (e.g. `https://setup-qc.atlascapture.io`). No redirect URIs are needed.
 4. Copy the client ID (`…apps.googleusercontent.com`) into `.env` as `GOOGLE_CLIENT_ID`, then restart.
 
-**The roster file:** `config/team.js` (not in git; copy `config/team.example.js` to start) syncs into the database on every start: emails, roles and studios are updated, new people are added, and roster people removed from the file are deactivated and signed out (their tickets stay). People added on the Team page or through access requests aren't affected. People listed without an email can't sign in until one is added.
+**The roster:** locally, `config/team.js` (not in git; copy `config/team.example.js` to start) syncs into the database whenever it changes: emails, roles and studios are updated, new people are added, and roster people removed from the file are deactivated and signed out (their tickets stay). Online there is no roster file: run `node scripts/export-roster.js` to make `config/team.json`, then upload it on the **Team → Import roster** card. People added on the Team page or through access requests aren't affected. People listed without an email can't sign in until one is added.
 
 ## Workflow
 
@@ -64,20 +66,22 @@ You can also offer "Sign in with Google" alongside email codes. The same access 
 | `DEV_LOGIN` | `1` enables the no-password name picker (local development only) |
 | `SITE_PASSWORD` | Shared password in front of the whole site (test deployments) |
 | `PORT` | HTTP port (default 3000) |
-| `DATA_DIR` | Where the SQLite DB and uploads live (default `./data`) |
-| `SESSION_SECRET` | Cookie signing secret (auto-generated into `data/.secret` if unset) |
+| `DATA_DIR` | Local database and uploads folder (default `./data`) |
+| `DATABASE_URL` / `NETLIFY_DATABASE_URL` | Postgres connection. Set automatically by Netlify DB; leave unset locally to use the embedded database |
+| `SESSION_SECRET` | Signs sessions, codes and media links. Required online; auto-generated into `data/.secret` locally |
+| `BOOTSTRAP_ADMINS` | Comma-separated emails that are always active admins (lets you sign in to a fresh online database) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Email for sign-in codes and ticket notifications. Without it, codes are shown on screen (test mode) |
 | `APP_URL` | Public base URL. Used for ticket links in emails; an `https` URL also marks the session cookie Secure |
 
 You can add projects besides EgoExo in `src/projects.js`. The form checklist, media slots and QC checks are all generated from that file.
 
-## Deploying (Render)
+## Deploying (Netlify)
 
-`render.yaml` sets up a Render web service (Singapore, Starter plan) with a 1 GB persistent disk at `/var/data` for the database and uploaded photos. The free plan has no disk, so data would be wiped on every deploy.
+`netlify.toml` configures everything: `public/` is served from Netlify's CDN, `/api/*` runs in the `api` Netlify Function, and `/media/*` is streamed by an edge function from **Netlify Blobs**. Data lives in **Netlify DB** (Postgres).
 
-1. In Render: **New → Blueprint**, connect GitHub, pick this repo, and apply.
-2. When asked, fill in `SMTP_USER`, `SMTP_PASS` (Gmail App Password), `APP_URL` (e.g. `https://studio-setup-qc.onrender.com`) and optionally `SITE_PASSWORD`.
-3. Service → **Environment → Secret Files**: add `team.js` with the contents of your local `config/team.js` (the app reads it from `/etc/secrets/team.js`).
-4. Deploy. Every push to `main` redeploys automatically.
+1. **Connect the repo:** Netlify → Add new site → Import from GitHub → this repo. The build settings come from `netlify.toml`.
+2. **Database:** enable **Netlify DB** for the site (it sets `NETLIFY_DATABASE_URL`). Netlify DB databases must be **claimed** into a Neon account within 7 days or they are deleted, so claim it from the site's database panel.
+3. **Environment variables** (Site configuration → Environment variables): `SESSION_SECRET` (a long random string), `BOOTSTRAP_ADMINS` (your email), `APP_URL` (the site's https address), and optionally `SITE_PASSWORD`, `ALLOWED_DOMAINS`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM`.
+4. **Deploy**, sign in with the bootstrap admin email, then on **Team → Import roster** upload `config/team.json` (made with `node scripts/export-roster.js`).
 
-Make sure `DEV_LOGIN` is not set in production.
+Uploads are sent in 4 MB parts to stay under Netlify's function request limit, and media links are signed and expire after 6 hours. Every push to `main` redeploys. Make sure `DEV_LOGIN` is not set online.

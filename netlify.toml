@@ -1,0 +1,37 @@
+# Netlify deployment.
+#   - public/                 static pages, served from Netlify's CDN
+#   - netlify/functions/api   the API (Express app in src/app.js)
+#   - netlify/edge-functions  /media/* streaming from Netlify Blobs
+# Required environment variables: SESSION_SECRET, BOOTSTRAP_ADMINS, APP_URL (see README).
+# The database comes from Netlify DB (NETLIFY_DATABASE_URL is set automatically).
+
+[build]
+  publish = "public"
+  command = "echo 'No build step'"
+
+[build.environment]
+  NODE_VERSION = "22"
+  AWS_LAMBDA_JS_RUNTIME = "nodejs22.x"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  external_node_modules = ["pg-native"]
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/site-login"
+  to = "/.netlify/functions/api/site-login"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/healthz"
+  to = "/.netlify/functions/api/healthz"
+  status = 200
+  force = true
