@@ -1,0 +1,5 @@
+node_modules/
+data/
+.env
+# Real team roster (names + emails) stays out of the repo; see config/team.example.js
+config/team.js
