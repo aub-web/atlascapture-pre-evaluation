@@ -8,10 +8,24 @@ const crypto = require('crypto');
 const express = require('express');
 const { OAuth2Client } = require('google-auth-library');
 const { q, one, run, tx, now, syncRoster, DATA_DIR } = require('./db');
-const { PROJECTS, getProject } = require('./projects');
+const { loadProjects, getProject, listProjects, saveProject, setProjectActive, toGuidelineFile, fromGuidelineFile, TEMPLATE } = require('./projects');
 const { notify, sendMail, mailEnabled } = require('./notify');
 const storage = require('./storage');
 const { syncTicketToSheet, sheetsEnabled } = require('./sheets');
+const { queueTicketMedia, processDriveJobs, driveStatus, retryFailed, driveEnabled } = require('./drive');
+const { buildManifest, streamZip } = require('./exports');
+
+// Queues Drive copies of a ticket's new media and sends what fits in a few seconds; the rest
+// continues from the scheduled drive-sync function. Never blocks or fails the ticket action.
+async function copyToDrive(ticketId, submissionNo) {
+  if (!driveEnabled()) return;
+  try {
+    await queueTicketMedia(ticketId, submissionNo);
+    await processDriveJobs(3500);
+  } catch (err) {
+    console.error('[drive] queue failed:', err.message);
+  }
+}
 const { HOSTED } = require('./env');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
@@ -71,6 +85,7 @@ function setupStatus() {
     SMTP: has('SMTP_HOST') && has('SMTP_USER') && has('SMTP_PASS'),
     EMAIL_VIA_SCRIPT: process.env.MAIL_VIA === 'apps-script',
     GOOGLE_SHEET: has('SHEETS_WEBHOOK_URL') && has('SHEETS_WEBHOOK_SECRET'),
+    GOOGLE_DRIVE: process.env.DRIVE_SYNC === '1',
   };
   const required = HOSTED ? ['SESSION_SECRET', 'DATABASE'] : [];
   return { ok: required.every((k) => settings[k]), missingRequired: required.filter((k) => !settings[k]), settings };
@@ -175,6 +190,7 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 
 app.use(async (req, res, next) => {
   try {
+    await loadProjects(); // projects live in the database (cached briefly); getProject() is sync after this
     const session = unsign(parseCookies(req.headers.cookie).sid);
     const [uid, emailTag] = String(session || '').split(':');
     const user = uid && (await one('SELECT * FROM users WHERE id = $1 AND active = 1', [Number(uid) || 0]));
@@ -196,11 +212,12 @@ const requireRole =
 // ---------- Helpers ----------
 
 const TICKET_SELECT = `
-  SELECT t.*, sd.name AS sd_name, spl.name AS spl_name, r.name AS reviewer_name
+  SELECT t.*, sd.name AS sd_name, spl.name AS spl_name, r.name AS reviewer_name, st.country AS country, st.region AS region
   FROM tickets t
   JOIN users sd ON sd.id = t.sd_id
   LEFT JOIN users spl ON spl.id = t.spl_id
-  LEFT JOIN users r ON r.id = t.reviewer_id`;
+  LEFT JOIN users r ON r.id = t.reviewer_id
+  LEFT JOIN studios st ON st.name = t.studio`;
 
 function shapeTicket(t) {
   return {
@@ -212,12 +229,20 @@ function shapeTicket(t) {
   };
 }
 
-// Which tickets a user may see: SDs their own, SPL/SPC their studio (or assigned), QC and Admins everything.
+// Which tickets a user may see:
+//   SD        their own
+//   SPL/SPC   their studio (or tickets assigned to them)
+//   QC        the open queue (pending, not yet picked up) + tickets they reviewed themselves
+//   ADMIN     everything (admins and project managers)
 // Appends its parameters to `params` and returns the SQL condition.
 function visibility(user, params) {
   if (user.role === 'SD') {
     params.push(user.id);
     return `t.sd_id = $${params.length}`;
+  }
+  if (user.role === 'QC') {
+    params.push(user.id);
+    return `((t.status = 'pending' AND (t.reviewer_id IS NULL OR t.reviewer_id = $${params.length})) OR t.reviewer_id = $${params.length})`;
   }
   if (user.role === 'SPL' || user.role === 'SPC') {
     params.push(user.studio, user.id);
@@ -258,16 +283,21 @@ async function collectSubmission(project, body) {
   const missing = project.setupChecklist.filter((c) => checklist[c.id] !== true);
   if (missing.length) throw new HttpError(400, `Confirm every setup checklist item. Missing: ${missing.map((m) => m.label).join('; ')}`);
 
-  const boundarySize = Number(body.boundarySize);
-  const { min, max } = project.boundary;
-  if (!(boundarySize >= min && boundarySize <= max)) throw new HttpError(400, `Boundary box must be between ${min}m and ${max}m`);
+  // Projects without a boundary box store 0.
+  let boundarySize = 0;
+  if (project.boundary) {
+    boundarySize = Number(body.boundarySize);
+    const { min, max } = project.boundary;
+    if (!(boundarySize >= min && boundarySize <= max)) throw new HttpError(400, `Boundary box must be between ${min}m and ${max}m`);
+  }
 
   const items = Array.isArray(body.media) ? body.media : [];
   const ids = items.map((i) => String(i.uploadId || ''));
   const uploads = Object.fromEntries((await q("SELECT * FROM uploads WHERE id = ANY($1) AND status = 'complete'", [ids])).map((u) => [u.id, u]));
   const bySlot = Object.fromEntries(items.map((i) => [i.slot, uploads[String(i.uploadId)]]));
 
-  const mediaType = body.mediaType === 'video' ? 'video' : 'images';
+  const mediaType = body.mediaType === 'video' && project.video ? 'video' : 'images';
+  if (!project.mediaSlots.length && mediaType !== 'video') throw new HttpError(400, 'Upload a setup video clip');
   const media = [];
   if (mediaType === 'video') {
     const u = bySlot.video;
@@ -557,9 +587,11 @@ app.get('/api/me', requireAuth, (req, res) => res.json(req.user));
 
 app.get('/api/meta', requireAuth, async (req, res) => {
   res.json({
-    projects: Object.values(PROJECTS),
+    projects: listProjects(),
     spls: await q("SELECT id, name, studio FROM users WHERE role = 'SPL' AND active = 1 ORDER BY studio"),
-    studios: (await q('SELECT DISTINCT studio FROM users WHERE studio IS NOT NULL ORDER BY studio')).map((r) => r.studio),
+    studios: (await q('SELECT name FROM studios WHERE active = 1 ORDER BY name')).map((r) => r.name),
+    locations: await q('SELECT name, region, country FROM studios WHERE active = 1 ORDER BY country NULLS LAST, region NULLS LAST, name'),
+    countries: [...new Set(['Philippines', 'Indonesia', 'Vietnam', ...(await q('SELECT DISTINCT country FROM studios WHERE country IS NOT NULL')).map((r) => r.country)])].sort(),
     statusLabels: STATUS_LABELS,
     feedbackTemplate: `${FEEDBACK_PLACEHOLDERS[0]} - ${FEEDBACK_PLACEHOLDERS[1]}`,
   });
@@ -603,6 +635,7 @@ async function createTicket(submitter, b, channel) {
     message: `${code} submitted by ${submitter.name} (${submitter.studio}) is awaiting QC review`,
   });
   await syncTicketToSheet(ticketId);
+  await copyToDrive(ticketId, 1);
   return ticketId;
 }
 
@@ -625,6 +658,7 @@ async function resubmitTicket(t, user, body, channel) {
     detail: note,
   });
   await syncTicketToSheet(t.id);
+  await copyToDrive(t.id, submissionNo);
 }
 
 app.post('/api/tickets', requireAuth, requireRole('SD'), async (req, res) => {
@@ -633,11 +667,11 @@ app.post('/api/tickets', requireAuth, requireRole('SD'), async (req, res) => {
 
 app.get('/api/tickets/:id', requireAuth, async (req, res) => {
   const t = await loadTicket(req.user, req.params.id);
-  const media = await q('SELECT id, submission_no, slot, label, mime, size, duration, original_name, storage_key, created_at FROM media WHERE ticket_id = $1 ORDER BY submission_no DESC, id', [t.id]);
+  const media = await q('SELECT id, submission_no, slot, label, mime, size, duration, original_name, storage_key, archived_at, created_at FROM media WHERE ticket_id = $1 ORDER BY submission_no DESC, id', [t.id]);
   res.json({
     ticket: shapeTicket(t),
     project: getProject(t.project),
-    media: media.map(({ storage_key, ...m }) => ({ ...m, url: mediaUrl(storage_key) })),
+    media: media.map(({ storage_key, ...m }) => ({ ...m, url: m.archived_at ? null : mediaUrl(storage_key) })),
     history: await historyFor(t.id),
   });
 });
@@ -732,7 +766,7 @@ const SUBMITTER_SQL = "SELECT * FROM users WHERE id = $1 AND active = 1 AND role
 
 app.get('/api/public/options', async (req, res) => {
   res.json({
-    projects: Object.values(PROJECTS),
+    projects: listProjects(),
     submitters: await q("SELECT id, name, role, studio FROM users WHERE active = 1 AND role IN ('SD', 'SPC', 'SPL') AND studio IS NOT NULL ORDER BY studio, name"),
     spls: await q("SELECT id, name, studio FROM users WHERE role = 'SPL' AND active = 1 ORDER BY studio"),
   });
@@ -833,8 +867,105 @@ app.patch('/api/team/:id', requireAuth, requireRole('ADMIN', 'SPL'), async (req,
     await run('UPDATE users SET login_approved = $1, access_request = NULL WHERE id = $2', [req.body.loginApproved ? 1 : 0, target.id]);
     return res.json({ ok: true });
   }
+  // Admins can edit anyone's role, studio, title, name and email.
+  if (['role', 'studio', 'title', 'name', 'email'].some((k) => k in (req.body || {}))) {
+    if (req.user.role !== 'ADMIN') throw new HttpError(403, 'Only admins can change roles and details');
+    const b = req.body;
+    const role = 'role' in b ? String(b.role) : target.role;
+    if (!REQUESTABLE_ROLES.includes(role)) throw new HttpError(400, 'Choose a valid role');
+    let studio = 'studio' in b ? String(b.studio || '').trim() || null : target.studio;
+    if (!STUDIO_ROLES.includes(role)) studio = null;
+    if (STUDIO_ROLES.includes(role) && !studio) throw new HttpError(400, 'Choose a studio for this role');
+    const name = 'name' in b ? String(b.name || '').trim().replace(/\s+/g, ' ') : target.name;
+    if (!name) throw new HttpError(400, 'Name is required');
+    const email = 'email' in b ? String(b.email || '').trim().toLowerCase() || null : target.email;
+    if (email && !validEmail(email)) throw new HttpError(400, 'Enter a valid email address');
+    if (email && email !== (target.email || '').toLowerCase() && (await one('SELECT 1 FROM users WHERE lower(email) = $1 AND id <> $2', [email, target.id]))) {
+      throw new HttpError(409, 'Someone else already has that email');
+    }
+    const title = 'title' in b ? String(b.title || '').trim() || null : target.title;
+    if (studio) await run('INSERT INTO studios (name) VALUES ($1) ON CONFLICT (name) DO NOTHING', [studio]);
+    // Edited people become app-managed so a later roster import doesn't silently undo the change.
+    await run("UPDATE users SET role = $1, studio = $2, name = $3, email = $4, title = $5, source = CASE WHEN source = 'roster' THEN 'manual' ELSE source END WHERE id = $6",
+      [role, studio, name, email, title, target.id]);
+    return res.json({ ok: true });
+  }
   if (target.source === 'roster') throw new HttpError(409, 'People from the roster are managed by re-importing the roster');
   await run('UPDATE users SET active = $1 WHERE id = $2', [req.body?.active ? 1 : 0, target.id]);
+  res.json({ ok: true });
+});
+
+// ---------- Studios (country + city/region, for dashboards and the Google Sheet tab) ----------
+
+app.get('/api/studios', requireAuth, async (req, res) => {
+  res.json(await q(`SELECT s.name, s.region, s.country, s.active,
+    (SELECT COUNT(*)::int FROM users u WHERE u.studio = s.name AND u.active = 1) AS members
+    FROM studios s ORDER BY s.country NULLS LAST, s.region NULLS LAST, s.name`));
+});
+
+app.post('/api/studios', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const name = String(req.body?.name || '').trim().replace(/\s+/g, ' ');
+  const region = String(req.body?.region || '').trim() || null;
+  const country = String(req.body?.country || '').trim() || null;
+  if (!name) throw new HttpError(400, 'Studio name is required');
+  if (!country || !region) throw new HttpError(400, 'Choose the country and city/region');
+  const original = String(req.body?.original || '').trim();
+  if (original && original !== name) {
+    // Rename: move people and tickets to the new name.
+    if (await one('SELECT 1 FROM studios WHERE name = $1', [name])) throw new HttpError(409, 'A studio with that name already exists');
+    await tx(async (c) => {
+      await c.run('INSERT INTO studios (name, region, country) VALUES ($1, $2, $3)', [name, region, country]);
+      await c.run('UPDATE users SET studio = $1 WHERE studio = $2', [name, original]);
+      await c.run('UPDATE tickets SET studio = $1 WHERE studio = $2', [name, original]);
+      await c.run('DELETE FROM studios WHERE name = $1', [original]);
+    });
+  } else {
+    await run(`INSERT INTO studios (name, region, country) VALUES ($1, $2, $3)
+      ON CONFLICT (name) DO UPDATE SET region = EXCLUDED.region, country = EXCLUDED.country, active = 1`, [name, region, country]);
+  }
+  res.json({ ok: true });
+});
+
+// ---------- Projects (admins add or edit guidelines; everyone reads active projects via /api/meta) ----------
+
+app.get('/api/projects', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  res.json(listProjects({ includeInactive: true }).map((p) => ({
+    id: p.id, name: p.name, active: p.active, builtin: p.builtin, custom: p.custom, updated_at: p.updated_at,
+    flags: p.flags.length, checks: p.qcChecks.length, views: p.mediaSlots.length, video: Boolean(p.video),
+    file: toGuidelineFile(p),
+  })));
+});
+
+app.get('/api/projects/template', requireAuth, requireRole('ADMIN'), (req, res) => {
+  res.setHeader('Content-Disposition', 'attachment; filename="project-guidelines-template.json"');
+  res.json(TEMPLATE);
+});
+
+async function upsertProject(req, res, existing) {
+  let config;
+  try {
+    config = fromGuidelineFile(req.body || {}, existing);
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
+  if (!existing && getProject(config.id)) throw new HttpError(409, `A project called "${getProject(config.id).name}" already exists`);
+  await saveProject(config, { active: existing ? existing.active : true });
+  res.status(existing ? 200 : 201).json({ id: config.id, name: config.name });
+}
+
+app.post('/api/projects', requireAuth, requireRole('ADMIN'), (req, res) => upsertProject(req, res, null));
+
+app.put('/api/projects/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const existing = getProject(req.params.id);
+  if (!existing) throw new HttpError(404, 'Project not found');
+  await upsertProject(req, res, existing);
+});
+
+app.patch('/api/projects/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  if (!getProject(req.params.id)) throw new HttpError(404, 'Project not found');
+  const active = Boolean(req.body?.active);
+  if (!active && listProjects().filter((p) => p.id !== req.params.id).length === 0) throw new HttpError(409, 'Keep at least one project active');
+  await setProjectActive(req.params.id, active);
   res.json({ ok: true });
 });
 
@@ -847,13 +978,79 @@ app.post('/api/admin/sheets-resync', requireAuth, requireRole('ADMIN'), async (r
   res.json({ total: ids.length, synced });
 });
 
+// ---------- Export ZIP + archive (admins) ----------
+
+const exportLink = (id) => {
+  const exp = Math.floor(Date.now() / 1000) + 2 * 60 * 60;
+  return `/export/${id}?e=${exp}&s=${hmac(`export:${id}:${exp}`)}`;
+};
+
+app.post('/api/admin/exports', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const ids = (Array.isArray(req.body?.ticketIds) ? req.body.ticketIds : []).map(Number).filter(Number.isInteger);
+  if (!ids.length) throw new HttpError(400, 'No tickets selected');
+  const result = await buildManifest(ids, { includeMedia: req.body?.includeMedia !== false });
+  res.json({ ...result, url: exportLink(result.id) });
+});
+
+// Local download; on Netlify the export edge function serves /export/*.
+app.get('/export/:id', async (req, res) => {
+  const { id } = req.params;
+  const a = Buffer.from(String(req.query.s || ''));
+  const b = Buffer.from(hmac(`export:${id}:${req.query.e}`));
+  if (!(Number(req.query.e) > Date.now() / 1000 && a.length === b.length && crypto.timingSafeEqual(a, b))) {
+    throw new HttpError(403, 'This export link has expired. Create the export again.');
+  }
+  const manifest = await storage.getDoc(id);
+  if (!manifest) throw new HttpError(404, 'Export not found');
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${manifest.fileName}"`);
+  await streamZip(manifest, (buf) => new Promise((resolve) => (res.write(buf) ? resolve() : res.once('drain', resolve))), storage.getChunk);
+  res.end();
+});
+
+// Frees storage: removes the photos/videos of approved tickets from the site (after exporting them).
+// Refused while a Drive copy of any of them hasn't finished, so nothing is lost.
+app.post('/api/admin/archive-media', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const ids = (Array.isArray(req.body?.ticketIds) ? req.body.ticketIds : []).map(Number).filter(Number.isInteger);
+  const media = await q(`SELECT m.id, m.storage_key FROM media m JOIN tickets t ON t.id = m.ticket_id
+    WHERE m.ticket_id = ANY($1) AND t.status = 'approved' AND m.archived_at IS NULL`, [ids]);
+  if (!media.length) return res.json({ archived: 0 });
+  if (driveEnabled()) {
+    const pending = await one(`SELECT COUNT(*)::int AS n FROM media m LEFT JOIN drive_jobs j ON j.media_id = m.id
+      WHERE m.id = ANY($1) AND (j.id IS NULL OR j.status <> 'done')`, [media.map((m) => m.id)]);
+    if (pending.n) throw new HttpError(409, `${pending.n} of these files haven't finished copying to Google Drive yet. Try again in a few minutes.`);
+  }
+  for (const m of media) {
+    await storage.deleteFile(m.storage_key);
+    await run('UPDATE media SET archived_at = $1 WHERE id = $2', [now(), m.id]);
+  }
+  res.json({ archived: media.length });
+});
+
+// ---------- Google Drive copies (admins) ----------
+
+app.get('/api/admin/drive', requireAuth, requireRole('ADMIN'), async (req, res) => res.json(await driveStatus()));
+
+app.post('/api/admin/drive/run', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  if (!driveEnabled()) throw new HttpError(409, 'Google Drive copying is not turned on (DRIVE_SYNC)');
+  if (req.body?.retryFailed) await retryFailed();
+  if (req.body?.queueExisting) {
+    for (const r of await q('SELECT DISTINCT ticket_id, submission_no FROM media WHERE archived_at IS NULL')) await queueTicketMedia(r.ticket_id, r.submission_no);
+  }
+  await processDriveJobs(7000);
+  res.json(await driveStatus());
+});
+
 // ---------- Metrics (SPL oversight) ----------
 
 app.get('/api/stats', requireAuth, requireRole('SPL', 'SPC', 'QC', 'ADMIN'), async (req, res) => {
   const params = [];
-  const tickets = await q(`SELECT t.id, t.status, t.studio, t.submission_no FROM tickets t WHERE ${visibility(req.user, params)}`, params);
-  const history = await q(`SELECT ticket_id, action, created_at FROM history
+  const tickets = await q(`SELECT t.id, t.status, t.studio, t.submission_no, st.country, st.region
+    FROM tickets t LEFT JOIN studios st ON st.name = t.studio WHERE ${visibility(req.user, params)}`, params);
+  let history = await q(`SELECT ticket_id, action, user_id, created_at FROM history
     WHERE action IN ('submitted','resubmitted','approved','returned') AND ticket_id = ANY($1) ORDER BY id`, [tickets.map((t) => t.id)]);
+  // A QC reviewer's numbers only count their own decisions.
+  if (req.user.role === 'QC') history = history.filter((h) => !['approved', 'returned'].includes(h.action) || h.user_id === req.user.id);
 
   const lastSubmit = {};
   let decisions = 0, totalMs = 0, approvals = 0, returns = 0;
@@ -881,6 +1078,13 @@ app.get('/api/stats', requireAuth, requireRole('SPL', 'SPC', 'QC', 'ADMIN'), asy
     returns,
     firstPassRate: approved.length ? approved.filter((t) => t.submission_no === 1).length / approved.length : null,
     avgDecisionMinutes: decisions ? totalMs / decisions / 60000 : null,
+    byLocation: Object.values(tickets.reduce((acc, t) => {
+      const key = `${t.country || 'Unassigned'}|${t.region || '—'}`;
+      acc[key] ||= { country: t.country || 'Unassigned', region: t.region || '—', total: 0, pending: 0, reviewing: 0, returned: 0, approved: 0 };
+      acc[key].total++;
+      acc[key][t.status]++;
+      return acc;
+    }, {})).sort((a, b) => a.country.localeCompare(b.country) || a.region.localeCompare(b.region)),
   });
 });
 

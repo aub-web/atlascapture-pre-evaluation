@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Atlas Capture">
+  <g fill="#8C9EFF">
+    <!-- four blades around a small cross-shaped gap -->
+    <polygon points="47.5,47.5 47.5,33 20,20 33,47.5"/>
+    <polygon points="52.5,47.5 52.5,33 94,6 67,47.5"/>
+    <polygon points="47.5,52.5 47.5,67 6,94 33,52.5"/>
+    <polygon points="52.5,52.5 52.5,67 80,80 67,52.5"/>
+  </g>
+</svg>

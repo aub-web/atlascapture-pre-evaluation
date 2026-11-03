@@ -9,6 +9,10 @@ const initials = (name) => name.split(/\s+/).filter((w) => /^[A-Za-z]/.test(w)).
 
 const ROLE_NAMES = { SD: 'Set Director', QC: 'QC Reviewer', SPL: 'Studio Project Lead', SPC: 'Studio Project Coordinator', ADMIN: 'Admin' };
 const roleLabel = (u) => u.title || ROLE_NAMES[u.role];
+
+// Atlas Capture logo (public/logo-mark.svg) in the header and on the start/login pages.
+const brandHtml = () => '<img class="brand-logo" src="/logo-mark.svg" alt=""><span class="brand-text"><b>atlas capture</b><small>Setup QC</small></span>';
+const heroLogoHtml = () => '<div class="hero-logo"><img src="/logo-mark.svg" alt="Atlas Capture"><span>atlas capture</span></div>';
 const STATUS_ORDER = ['pending', 'reviewing', 'returned', 'approved'];
 
 const icon = {
@@ -25,6 +29,7 @@ const icon = {
   undo: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
   camera: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="13" r="3.5"/></svg>',
   user: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>',
+  download: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>',
   clock: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
 };
 const bigIcon = (svg) => svg.replace(/width="\d+" height="\d+"/, 'width="18" height="18"');
@@ -173,6 +178,8 @@ async function route() {
     if (hash === '/') return await renderHome(view);
     if (hash === '/new' && state.me.role === 'SD') return renderNewTicket(view);
     if (hash === '/team' && ['ADMIN', 'SPL'].includes(state.me.role)) return await renderTeam(view);
+    if (hash === '/projects' && state.me.role === 'ADMIN') return await renderProjects(view);
+    if ((m = hash.match(/^\/projects\/([\w-]+)$/)) && state.me.role === 'ADMIN') return await renderProjectEditor(view, m[1]);
     if ((m = hash.match(/^\/t\/(\d+)$/))) return await renderTicket(view, Number(m[1]));
     view.innerHTML = '<div class="empty"><h3>Page not found</h3><a href="#/">Go home</a></div>';
   } catch (err) {
@@ -190,7 +197,7 @@ function renderHeader(hash) {
     clearInterval(state.notifTimer);
     header.hidden = hash === '/welcome' || hash === '/login';
     header.innerHTML = `
-      <a class="brand" href="#/welcome"><span class="brand-mark">${icon.check.replace('currentColor', '#fff')}</span><span class="brand-text">Studio Setup QC</span></a>
+      <a class="brand" href="#/welcome">${brandHtml()}</a>
       <div class="header-right"><a class="btn" href="#/login">Log in</a></div>`;
     return;
   }
@@ -198,11 +205,12 @@ function renderHeader(hash) {
   const homeLabel = { SD: 'My tickets', QC: 'Review queue' }[me.role] || 'Overview';
   header.hidden = false;
   header.innerHTML = `
-    <a class="brand" href="#/"><span class="brand-mark">${icon.check.replace('currentColor', '#fff')}</span><span class="brand-text">Studio Setup QC</span></a>
+    <a class="brand" href="#/">${brandHtml()}</a>
     <nav class="nav">
       <a href="#/" class="${hash === '/' ? 'active' : ''}">${homeLabel}</a>
       ${me.role === 'SD' ? `<a href="#/new" class="${hash === '/new' ? 'active' : ''}">New ticket</a>` : ''}
       ${['ADMIN', 'SPL'].includes(me.role) ? `<a href="#/team" class="${hash === '/team' ? 'active' : ''}">Team</a>` : ''}
+      ${me.role === 'ADMIN' ? `<a href="#/projects" class="${hash.startsWith('/projects') ? 'active' : ''}">Projects</a>` : ''}
     </nav>
     <div class="header-right">
       <div class="bell">
@@ -292,7 +300,7 @@ async function renderLogin(view) {
   view.innerHTML = `
     <div class="login">
       <div class="login-hero">
-        <div class="brand-mark">${icon.check.replace('width="12" height="12"', 'width="24" height="24"').replace('currentColor', '#fff')}</div>
+        ${heroLogoHtml()}
         <h1>Log in</h1>
         <p>Pre-recording setup approvals for the Studio QA/Capture team. <a href="#/welcome">← Back</a></p>
       </div>
@@ -387,19 +395,27 @@ async function renderHome(view) {
   }
   if (me.role === 'QC') {
     view.innerHTML = `
-      <div class="page-head"><div><h1>Review queue</h1><p>Open a ticket to review the 4 EXO and 1 EGO camera views against the checklist.</p></div></div>
+      <div class="page-head"><div><h1>Review queue</h1><p>Tickets waiting for review, plus the ones you've approved or returned. Your numbers count only your own reviews.</p></div></div>
       <div id="stats"></div>
       <div class="card" id="list"></div>`;
     renderStats($('#stats'));
-    return ticketList($('#list'), { defaultTab: 'open', columns: ['ticket', 'sd', 'studio', 'status', 'round', 'reviewer', 'updated'] });
+    return ticketList($('#list'), { defaultTab: 'open', columns: ['ticket', 'project', 'sd', 'location', 'status', 'round', 'updated'] });
   }
   if (me.role === 'ADMIN') {
     view.innerHTML = `
-      <div class="page-head"><div><h1>All studios overview</h1><p>Setup submissions and QC outcomes across every studio.</p></div></div>
+      <div class="page-head"><div><h1>All studios overview</h1><p>Setup submissions and QC outcomes across every country, city and studio.</p></div>
+        <button class="btn" id="exportZip" type="button">${icon.download} Export ZIP</button></div>
       <div id="stats"></div>
       <div class="card" id="list"></div>`;
-    renderStats($('#stats'));
-    return ticketList($('#list'), { defaultTab: 'all', columns: ['ticket', 'project', 'sd', 'studio', 'status', 'round', 'reviewer', 'updated'] });
+    renderStats($('#stats'), { byLocation: true });
+    let visible = [];
+    let currentFilters = {};
+    $('#exportZip').onclick = () => openExportDialog(visible, currentFilters);
+    return ticketList($('#list'), {
+      defaultTab: 'all',
+      columns: ['ticket', 'project', 'sd', 'location', 'status', 'round', 'reviewer', 'updated'],
+      onFilter: (rows, f) => { visible = rows; currentFilters = f; },
+    });
   }
   view.innerHTML = `
     <div class="page-head"><div><h1>${esc(me.studio)} overview</h1><p>Setup submissions, QC outcomes and tickets that need corrections.</p></div></div>
@@ -409,8 +425,14 @@ async function renderHome(view) {
   return ticketList($('#list'), { defaultTab: 'returned', columns: ['ticket', 'sd', 'status', 'round', 'reviewer', 'updated'] });
 }
 
-async function renderStats(el) {
+async function renderStats(el, { byLocation = false } = {}) {
   const s = await api('/api/stats');
+  const locationTable = byLocation && s.byLocation?.length ? `
+    <div class="card by-location">
+      <div class="card-head"><h2>By country and city</h2><span class="muted small">All tickets</span></div>
+      <div class="table-scroll"><table class="tickets"><thead><tr><th>Country</th><th>City / region</th><th>Pending</th><th>In review</th><th>Needs fixes</th><th>Approved</th><th>Total</th></tr></thead>
+      <tbody>${s.byLocation.map((l) => `<tr class="static"><td><b>${esc(l.country)}</b></td><td>${esc(l.region)}</td><td>${l.pending}</td><td>${l.reviewing}</td><td>${l.returned}</td><td>${l.approved}</td><td><b>${l.total}</b></td></tr>`).join('')}</tbody></table></div>
+    </div>` : '';
   const pct = s.firstPassRate == null ? '—' : `${Math.round(s.firstPassRate * 100)}<small>%</small>`;
   const avg = s.avgDecisionMinutes == null ? '—'
     : s.avgDecisionMinutes < 60 ? `${Math.round(s.avgDecisionMinutes)}<small> min</small>`
@@ -422,10 +444,12 @@ async function renderStats(el) {
     <div class="card stat"><div class="k">Approved</div><div class="v">${s.counts.approved}</div></div>
     <div class="card stat"><div class="k">First-pass approval</div><div class="v">${pct}</div></div>
     <div class="card stat"><div class="k">Avg. QC turnaround</div><div class="v">${avg}</div></div>
-  </div>`;
+  </div>${locationTable}`;
 }
 
-async function ticketList(el, { defaultTab, columns }) {
+// Ticket list with status tabs, search and (for everyone but SDs) Country / City / Project filters.
+// `onFilter(rows, filters)` is told whenever the visible rows change (used by Export ZIP).
+async function ticketList(el, { defaultTab, columns, onFilter }) {
   const tickets = await api('/api/tickets');
   const tabs = [
     { id: 'all', label: 'All', match: () => true },
@@ -435,38 +459,75 @@ async function ticketList(el, { defaultTab, columns }) {
   ];
   let tab = defaultTab;
   let q = '';
+  const filters = { country: '', region: '', project: '' };
+  const showFilters = state.me.role !== 'SD';
   const cols = {
     ticket: ['Ticket', (t) => `<div class="code">${esc(t.code)}</div><div class="sub">${esc(t.task_name)} · ${esc(t.scene)}</div>`],
     project: ['Project', (t) => esc(t.project_name), 'hide-sm'],
     sd: ['Set Director', (t) => esc(t.sd_name)],
     spl: ['SPL', (t) => esc(t.spl_name), 'hide-sm'],
     studio: ['Studio', (t) => esc(t.studio), 'hide-sm'],
+    location: ['Location', (t) => `${esc(t.country || '—')}<div class="sub">${esc(t.region || '')}${t.region && t.studio ? ' · ' : ''}${esc(t.studio || '')}</div>`, 'hide-sm'],
     status: ['Status', (t) => pill(t)],
     round: ['Round', (t) => `<span class="muted">#${t.submission_no}</span>`, 'hide-sm'],
     reviewer: ['QC', (t) => (t.reviewer_name ? esc(t.reviewer_name) : '<span class="faint">—</span>'), 'hide-sm'],
     updated: ['Updated', (t) => `<span class="muted" title="${esc(fullTime(t.updated_at))}">${timeAgo(t.updated_at)}</span>`],
   };
 
+  // Filter options: countries/cities from the studios list (so e.g. Vietnam shows before its first ticket).
+  const locations = state.meta.locations || [];
+  const countries = [...new Set([...(state.meta.countries || []), ...tickets.map((t) => t.country).filter(Boolean)])].sort();
+  const projects = [...new Map(tickets.map((t) => [t.project, t.project_name])).entries()];
+  const option = (value, label, selected) => `<option value="${esc(value)}" ${value === selected ? 'selected' : ''}>${esc(label)}</option>`;
+  const regionOptions = () => {
+    const regions = [...new Set([
+      ...locations.filter((l) => !filters.country || l.country === filters.country).map((l) => l.region),
+      ...tickets.filter((t) => !filters.country || t.country === filters.country).map((t) => t.region),
+    ].filter(Boolean))].sort();
+    return `<option value="">All cities / regions</option>${regions.map((r) => option(r, r, filters.region)).join('')}`;
+  };
+
   el.innerHTML = `
     <div class="toolbar"><div class="tabs"></div><input type="search" class="search" placeholder="Search code, task, scene, SD…"></div>
+    ${showFilters ? `<div class="filters">
+      <select data-f="country" aria-label="Country"><option value="">All countries</option>${countries.map((c) => option(c, c, '')).join('')}</select>
+      <select data-f="region" aria-label="City or region">${regionOptions()}</select>
+      ${projects.length > 1 ? `<select data-f="project" aria-label="Project"><option value="">All projects</option>${projects.map(([id, name]) => option(id, name, '')).join('')}</select>` : ''}
+      <span class="filter-count muted small"></span>
+    </div>` : ''}
     <div class="list-body"></div>`;
+  const inFilters = (t) => (!filters.country || t.country === filters.country) && (!filters.region || t.region === filters.region) && (!filters.project || t.project === filters.project);
   const draw = () => {
-    $('.tabs', el).innerHTML = tabs.map((t) => `<button class="${t.id === tab ? 'on' : ''}" data-tab="${t.id}">${t.label} <span class="n">${tickets.filter(t.match).length}</span></button>`).join('');
+    const scoped = tickets.filter(inFilters);
+    $('.tabs', el).innerHTML = tabs.map((t) => `<button class="${t.id === tab ? 'on' : ''}" data-tab="${t.id}">${t.label} <span class="n">${scoped.filter(t.match).length}</span></button>`).join('');
     const needle = q.toLowerCase();
-    const rows = tickets
+    const rows = scoped
       .filter(tabs.find((t) => t.id === tab).match)
-      .filter((t) => !needle || [t.code, t.task_name, t.scene, t.business_type, t.sd_name, t.studio].some((v) => String(v || '').toLowerCase().includes(needle)));
+      .filter((t) => !needle || [t.code, t.task_name, t.scene, t.business_type, t.sd_name, t.studio, t.country, t.region].some((v) => String(v || '').toLowerCase().includes(needle)));
     if (tab === 'open') rows.sort((a, b) => a.updated_at.localeCompare(b.updated_at)); // oldest first: FIFO queue
+    const active = Object.values(filters).some(Boolean);
+    if ($('.filter-count', el)) $('.filter-count', el).textContent = active ? `${scoped.length} of ${tickets.length} tickets match` : '';
     $('.list-body', el).innerHTML = rows.length
       ? `<table class="tickets"><thead><tr>${columns.map((c) => `<th class="${cols[c][2] || ''}">${cols[c][0]}</th>`).join('')}</tr></thead>
          <tbody>${rows.map((t) => `<tr data-id="${t.id}">${columns.map((c) => `<td class="${cols[c][2] || ''}">${cols[c][1](t)}</td>`).join('')}</tr>`).join('')}</tbody></table>`
-      : `<div class="empty"><h3>No tickets here</h3><p>${tickets.length ? 'Try a different tab or search.' : state.me.role === 'SD' ? 'Create your first setup ticket before filming.' : 'Nothing has been submitted yet.'}</p></div>`;
+      : `<div class="empty"><h3>No tickets here</h3><p>${tickets.length ? 'Try a different tab, filter or search.' : state.me.role === 'SD' ? 'Create your first setup ticket before filming.' : 'Nothing has been submitted yet.'}</p></div>`;
+    onFilter?.(rows, { ...filters, tab, q });
   };
   draw();
   $('.tabs', el).onclick = (e) => {
     const b = e.target.closest('button');
     if (b) { tab = b.dataset.tab; draw(); }
   };
+  $('.filters', el)?.addEventListener('change', (e) => {
+    const f = e.target.dataset.f;
+    if (!f) return;
+    filters[f] = e.target.value;
+    if (f === 'country') {
+      filters.region = '';
+      $('[data-f="region"]', el).innerHTML = regionOptions();
+    }
+    draw();
+  });
   $('.search', el).oninput = (e) => { q = e.target.value; draw(); };
   $('.list-body', el).onclick = (e) => {
     const tr = e.target.closest('tr[data-id]');
@@ -501,9 +562,12 @@ const flagTag = (c) => (c.flagCode ? ` <span class="flag-tag">${esc(c.flagCode)}
 // ---------- Submission fields (checklist + media), shared by New and Resubmit ----------
 
 function mountSubmissionFields(root, project, prefill = {}) {
-  const b = project.boundary;
+  const b = project.boundary; // null when the project has no boundary box
   const sizes = [];
-  for (let v = b.min; v <= b.max + 1e-9; v += b.step) sizes.push(v);
+  if (b) for (let v = b.min; v <= b.max + 1e-9; v += b.step || 0.5) sizes.push(v);
+  const hasImages = project.mediaSlots.length > 0;
+  const hasVideo = Boolean(project.video);
+  const viewList = project.mediaSlots.map((s) => s.label).join(', ');
   const plain = project.setupChecklist.filter((c) => !c.group);
   const groups = [...new Set(project.setupChecklist.filter((c) => c.group).map((c) => c.group))];
   const checkItem = (c) => `<label class="check"><input type="checkbox" data-check="${c.id}"><div>${esc(c.label)}</div></label>`;
@@ -513,32 +577,33 @@ function mountSubmissionFields(root, project, prefill = {}) {
     <p class="section-title checklist-title" style="margin-top:20px">Setup checklist · ${esc(project.name)}
       <span class="checklist-count" data-count></span></p>
     <p class="muted small" style="margin:-6px 0 10px">Tick every item to confirm your setup before submitting.</p>
-    <label class="field" style="max-width:260px;margin-bottom:12px"><span>Boundary box size <em>*</em></span>
+    ${b ? `<label class="field" style="max-width:260px;margin-bottom:12px"><span>Boundary box size <em>*</em></span>
       <select data-boundary>${sizes.map((v) => `<option value="${v}" ${v === (prefill.boundarySize ?? b.standard) ? 'selected' : ''}>${v}m × ${v}m${v === b.standard ? ' (standard)' : ''}</option>`).join('')}</select>
-    </label>
+    </label>` : ''}
     <div class="checklist">${plain.map(checkItem).join('')}</div>
     ${groups.map((g) => `<div class="check-group" style="margin-top:8px"><div class="gl">${esc(g)}</div><div class="checklist">
       ${project.setupChecklist.filter((c) => c.group === g).map(checkItem).join('')}</div></div>`).join('')}
 
     <p class="section-title" style="margin-top:24px">Setup preview</p>
-    <div class="seg" data-mode-toggle>
-      <button type="button" data-mode="images" class="on">Images (5 views)</button>
+    ${hasImages && hasVideo ? `<div class="seg" data-mode-toggle>
+      <button type="button" data-mode="images" class="on">Images (${project.mediaSlots.length} view${project.mediaSlots.length > 1 ? 's' : ''})</button>
       <button type="button" data-mode="video">Video clip</button>
-    </div>
-    <div class="prompt">${icon.info}<div>The preview must show <b>all 4 EXO camera views and 1 EGO camera view</b>.
-      Upload one image per camera, or a single <b>${project.video.minSec}–${project.video.maxSec} second</b> video that shows every view.</div></div>
-    <div data-pane="images" class="slots">
+    </div>` : ''}
+    <div class="prompt">${icon.info}<div>
+      ${hasImages ? `The preview must show every camera view: <b>${esc(viewList)}</b>. Upload one image per view` : 'Upload a video of the setup'}${hasImages && hasVideo ? ', or a single' : hasVideo ? ':' : '.'}
+      ${hasVideo ? `<b>${project.video.minSec}–${project.video.maxSec} second</b> video${hasImages ? ' that shows every view' : ''}.` : ''}</div></div>
+    ${hasImages ? `<div data-pane="images" class="slots" style="grid-template-columns:repeat(${Math.min(project.mediaSlots.length, 5)},minmax(0,1fr))">
       ${project.mediaSlots.map((s) => `<label class="slot" data-slot="${s.key}"><span class="slot-label">${esc(s.label)}</span>
         <input type="file" accept="image/*"><div class="ph">${icon.image}<span>Add image</span></div></label>`).join('')}
-    </div>
-    <div data-pane="video" hidden>
+    </div>` : ''}
+    ${hasVideo ? `<div data-pane="video" ${hasImages ? 'hidden' : ''}>
       <label class="dropzone"><input type="file" accept="video/*">
         <div class="faint">${icon.video}</div><div><b>Choose a video</b> or drop it here</div>
         <div class="muted small">${project.video.minSec}–${project.video.maxSec} seconds · MP4 / MOV</div></label>
       <div class="video-preview" hidden><video controls muted playsinline></video><div class="dur"></div></div>
-    </div>`;
+    </div>` : ''}`;
 
-  let mode = 'images';
+  let mode = hasImages ? 'images' : 'video';
   let videoDuration = null;
   const slotFiles = {};
   let videoFile = null;
@@ -559,8 +624,9 @@ function mountSubmissionFields(root, project, prefill = {}) {
   }));
   updateCount();
 
-  // Mode toggle
-  $('[data-mode-toggle]', root).onclick = (e) => {
+  // Mode toggle (only when the project allows both photos and a video)
+  const toggle = $('[data-mode-toggle]', root);
+  if (toggle) toggle.onclick = (e) => {
     const btn = e.target.closest('button');
     if (!btn) return;
     mode = btn.dataset.mode;
@@ -594,11 +660,11 @@ function mountSubmissionFields(root, project, prefill = {}) {
     enableDrop(slot, setFile);
   });
 
-  // Video
+  // Video (only when the project allows one)
   const dz = $('.dropzone', root);
   const preview = $('.video-preview', root);
-  const videoEl = $('video', preview);
-  const durEl = $('.dur', preview);
+  const videoEl = preview && $('video', preview);
+  const durEl = preview && $('.dur', preview);
   const setVideo = (file) => {
     if (!file.type.startsWith('video/')) return toast('Please choose a video file', 'error');
     videoFile = file;
@@ -618,8 +684,10 @@ function mountSubmissionFields(root, project, prefill = {}) {
       durEl.textContent = "This browser can't read the video. Try an MP4 (H.264) file.";
     };
   };
-  $('input', dz).onchange = (e) => e.target.files[0] && setVideo(e.target.files[0]);
-  enableDrop(dz, setVideo);
+  if (dz) {
+    $('input', dz).onchange = (e) => e.target.files[0] && setVideo(e.target.files[0]);
+    enableDrop(dz, setVideo);
+  }
 
   return {
     validate() {
@@ -645,7 +713,7 @@ function mountSubmissionFields(root, project, prefill = {}) {
     },
     values() {
       return {
-        boundarySize: $('[data-boundary]', root).value,
+        boundarySize: $('[data-boundary]', root)?.value ?? null,
         checklist: Object.fromEntries($$('.check input', root).map((cb) => [cb.dataset.check, cb.checked])),
         mediaType: mode,
       };
@@ -811,7 +879,8 @@ async function renderTicket(view, id) {
             <dt>Task Name</dt><dd>${esc(t.task_name)}</dd>
             <dt>Scene</dt><dd>${esc(t.scene)}</dd>
             <dt>Business Type</dt><dd>${esc(t.business_type)}</dd>
-            <dt>Boundary box</dt><dd>${t.boundary_size}m × ${t.boundary_size}m</dd>
+            ${t.boundary_size ? `<dt>Boundary box</dt><dd>${t.boundary_size}m × ${t.boundary_size}m</dd>` : ""}
+            ${t.country ? `<dt>Location</dt><dd>${esc(t.country)}${t.region ? ` · ${esc(t.region)}` : ""}</dd>` : ""}
             <dt>QC reviewer</dt><dd>${esc(t.reviewer_name || '—')}</dd>
             <dt>Submitted</dt><dd>${fullTime(t.created_at)}</dd>
           </dl></div>
@@ -878,6 +947,10 @@ function statusBanner(t, lastReturn) {
 
 function mediaGallery(items) {
   if (!items.length) return '<div class="empty">No media</div>';
+  // Files an admin removed from site storage after exporting (still in the ZIP / Google Drive).
+  if (items.every((m) => m.archived_at)) {
+    return `<div class="archived-note">${icon.info}<div><b>Files archived</b><div class="muted small">Removed from the site on ${fullTime(items[0].archived_at)} after export. They're in the exported ZIP and the Google Drive folder.</div></div></div>`;
+  }
   const video = items.find((m) => m.slot === 'video');
   if (video) {
     return `<div class="gallery-video"><video controls preload="metadata" src="${esc(video.url)}"></video>

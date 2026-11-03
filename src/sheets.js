@@ -33,13 +33,13 @@ const cell = (v) => (typeof v === 'string' && /^[=+\-@]/.test(v) ? `'${v}` : v ?
 async function syncTicketToSheet(ticketId) {
   if (!sheetsEnabled()) return false;
   try {
-    const t = await one(`SELECT t.*, sd.name AS sd_name, spl.name AS spl_name, r.name AS reviewer_name
+    const t = await one(`SELECT t.*, sd.name AS sd_name, spl.name AS spl_name, r.name AS reviewer_name, st.country AS country
       FROM tickets t JOIN users sd ON sd.id = t.sd_id LEFT JOIN users spl ON spl.id = t.spl_id LEFT JOIN users r ON r.id = t.reviewer_id
+      LEFT JOIN studios st ON st.name = t.studio
       WHERE t.id = $1`, [ticketId]);
     if (!t) return false;
     const lastReturn = await one(`SELECT h.comment, u.name AS user_name FROM history h LEFT JOIN users u ON u.id = h.user_id
       WHERE h.ticket_id = $1 AND h.action = 'returned' ORDER BY h.id DESC LIMIT 1`, [t.id]);
-    const countries = JSON.parse((await one("SELECT value FROM meta WHERE key = 'studio_countries'"))?.value || '{}');
 
     const row = {
       Ticket: t.code,
@@ -51,7 +51,7 @@ async function syncTicketToSheet(ticketId) {
       'Task Name': t.task_name,
       Scene: t.scene,
       'Business Type': t.business_type,
-      'Boundary (m)': `${t.boundary_size} x ${t.boundary_size}`,
+      'Boundary (m)': t.boundary_size ? `${t.boundary_size} x ${t.boundary_size}` : '',
       Round: t.submission_no,
       'QC Reviewer': t.reviewer_name || '',
       'Latest QC Feedback': lastReturn ? `${lastReturn.comment}${lastReturn.user_name ? ` (${lastReturn.user_name})` : ''}` : '',
@@ -66,7 +66,7 @@ async function syncTicketToSheet(ticketId) {
     const res = await fetch(process.env.SHEETS_WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ secret: process.env.SHEETS_WEBHOOK_SECRET, country: countries[t.studio] || 'Other', row }),
+      body: JSON.stringify({ secret: process.env.SHEETS_WEBHOOK_SECRET, country: t.country || 'Other', row }),
       redirect: 'follow',
       signal: AbortSignal.timeout(15_000),
     });

@@ -420,3 +420,51 @@ table.tickets { width: 100%; border-collapse: collapse; }
 .site-gate h1 { font-size: 20px; }
 .site-gate p { margin: 0; }
 .site-gate input { height: 44px; }
+
+/* ---------- Atlas Capture branding ---------- */
+.brand-logo { width: 30px; height: 30px; flex: none; }
+.brand-text { display: flex; flex-direction: column; line-height: 1.05; }
+.brand-text b { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
+.brand-text small { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .02em; }
+.hero-logo { display: flex; flex-direction: column; align-items: center; gap: 6px; margin-bottom: 14px; }
+.hero-logo img { width: 76px; height: 76px; }
+.hero-logo span { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; color: var(--text); }
+
+/* ---------- Dashboard filters + by-location ---------- */
+.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.filters select { width: auto; min-width: 150px; height: 34px; }
+.by-location { margin-bottom: 20px; }
+.by-location td, .by-location th { white-space: nowrap; }
+table.tickets tr.static { cursor: default; }
+table.tickets tr.static:hover { background: transparent; }
+@media (max-width: 720px) { .filters select { flex: 1 1 140px; } }
+
+/* ---------- Projects ---------- */
+.file-help { margin-bottom: 20px; }
+.project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+.project-card.inactive { opacity: .7; }
+.project-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.project-facts { list-style: none; padding: 0; margin: 10px 0 14px; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); }
+.project-facts b { color: var(--text); }
+.repeat-card { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; display: grid; gap: 10px; background: var(--surface); }
+.repeat-head { display: flex; align-items: center; justify-content: space-between; }
+.option-box { border: 1px solid var(--border); border-radius: 9px; padding: 10px; display: grid; gap: 10px; }
+.mini-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.mini-grid[hidden] { display: none; }
+.btn.small { height: 30px; padding: 0 10px; font-size: 13px; }
+label.btn { cursor: pointer; }
+
+/* ---------- Modal + studios ---------- */
+.modal-backdrop { position: fixed; inset: 0; z-index: 150; background: rgba(10, 14, 22, .45); display: grid; place-items: center; padding: 16px; }
+.modal { width: 100%; max-width: 460px; max-height: calc(100vh - 32px); overflow: auto; box-shadow: var(--shadow-lg); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); }
+.studio-country + .studio-country { margin-top: 14px; }
+.studio-country-name { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 6px; }
+.studio-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; border-top: 1px solid var(--border); }
+
+/* ---------- Export + archive ---------- */
+.export-ready { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-radius: 8px; background: var(--green-soft); color: var(--green); font-weight: 600; font-size: 13px; }
+.archive-box { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.archive-box summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+.archived-note { display: flex; gap: 10px; padding: 14px; border-radius: 9px; background: var(--surface-2); }
+.archived-note svg { flex: none; color: var(--muted); margin-top: 2px; }

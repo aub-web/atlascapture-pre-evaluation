@@ -17,6 +17,10 @@
 
 const SECRET = 'PASTE_SHEETS_WEBHOOK_SECRET_HERE';
 
+// Google Drive folder that receives a copy of every submitted photo/video (site setting DRIVE_SYNC=1).
+// The ID is the part after /folders/ in the folder's link. The script owner needs edit access to it.
+const DRIVE_FOLDER_ID = 'PASTE_DRIVE_FOLDER_ID_HERE';
+
 const HEADERS = [
   'Ticket', 'Status', 'Project', 'Studio', 'Set Director', 'Assigned SPL', 'Task Name', 'Scene', 'Business Type',
   'Boundary (m)', 'Round', 'QC Reviewer', 'Latest QC Feedback', 'Submitted Via', 'Submitted At', 'Last Updated', 'Decided At', 'Link',
@@ -32,6 +36,8 @@ function doPost(e) {
   if (!data || data.secret !== SECRET) return reply({ ok: false, error: 'unauthorized' });
   if (data.action === 'email') return sendEmail(data);
   if (data.action === 'email-check') return reply({ ok: true, email: true, quota: MailApp.getRemainingDailyQuota() });
+  if (data.action === 'drive-session') return driveSession(data);
+  if (data.action === 'drive-check') return reply({ ok: true, folder: DriveApp.getFolderById(DRIVE_FOLDER_ID).getName() });
   if (!data.row || !data.row.Ticket) return reply({ ok: false, error: 'missing row' });
 
   const lock = LockService.getScriptLock();
@@ -58,6 +64,40 @@ function sendEmail(data) {
   if (MailApp.getRemainingDailyQuota() < recipients.length) return reply({ ok: false, error: 'daily email quota reached' });
   recipients.forEach((to) => MailApp.sendEmail({ to: to, subject: String(data.subject || 'Studio Setup QC'), body: String(data.text || ''), name: 'Studio Setup QC' }));
   return reply({ ok: true, sent: recipients.length, quota: MailApp.getRemainingDailyQuota() });
+}
+
+// Opens a Drive "resumable upload session" for one file in the folder and returns its URL.
+// The site then sends the file's bytes straight to that URL; the URL only allows uploading this one file.
+function driveSession(data) {
+  const folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+  const res = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true', {
+    method: 'post',
+    contentType: 'application/json; charset=UTF-8',
+    headers: {
+      Authorization: 'Bearer ' + ScriptApp.getOAuthToken(),
+      'X-Upload-Content-Type': String(data.mime || 'application/octet-stream'),
+      'X-Upload-Content-Length': String(data.size || 0),
+    },
+    payload: JSON.stringify({ name: String(data.name || 'upload'), parents: [folder.getId()] }),
+    muteHttpExceptions: true,
+  });
+  const headers = res.getHeaders();
+  const location = headers.Location || headers.location;
+  if (res.getResponseCode() !== 200 || !location) {
+    return reply({ ok: false, error: 'Drive session failed: HTTP ' + res.getResponseCode() + ' ' + res.getContentText().slice(0, 200) });
+  }
+  return reply({ ok: true, uploadUrl: location });
+}
+
+// Run once from the editor (choose authorizeDrive → Run) to grant the Drive permissions.
+function authorizeDrive() {
+  Logger.log('Drive folder: ' + DriveApp.getFolderById(DRIVE_FOLDER_ID).getName());
+  UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/about?fields=user', { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() } });
+}
+
+// Run once from the editor to grant the email permission.
+function authorizeEmail() {
+  Logger.log(MailApp.getRemainingDailyQuota());
 }
 
 function doGet() {

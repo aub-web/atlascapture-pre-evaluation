@@ -171,7 +171,7 @@ async function renderWelcome(view) {
   view.innerHTML = `
     <div class="welcome">
       <div class="login-hero">
-        <div class="brand-mark">${icon.check.replace('width="12" height="12"', 'width="24" height="24"').replace('currentColor', '#fff')}</div>
+        ${heroLogoHtml()}
         <h1>Studio Setup QC</h1>
         <p>Pre-recording setup approvals for the Studio QA/Capture team. What would you like to do?</p>
       </div>
@@ -369,7 +369,8 @@ async function renderPublicTicket(view, id) {
             <dt>Task Name</dt><dd>${esc(t.task_name)}</dd>
             <dt>Scene</dt><dd>${esc(t.scene)}</dd>
             <dt>Business Type</dt><dd>${esc(t.business_type)}</dd>
-            <dt>Boundary box</dt><dd>${t.boundary_size}m × ${t.boundary_size}m</dd>
+            ${t.boundary_size ? `<dt>Boundary box</dt><dd>${t.boundary_size}m × ${t.boundary_size}m</dd>` : ""}
+            ${t.country ? `<dt>Location</dt><dd>${esc(t.country)}${t.region ? ` · ${esc(t.region)}` : ""}</dd>` : ""}
             <dt>QC reviewer</dt><dd>${esc(t.reviewer_name || '—')}</dd>
             <dt>Submitted</dt><dd>${fullTime(t.created_at)}</dd>
           </dl></div>
@@ -396,9 +397,63 @@ async function renderPublicTicket(view, id) {
 
 // ---------- Team (add users) ----------
 
+// Studio <option>s grouped by country → city/region.
+function studioOptions(selected) {
+  const groups = {};
+  for (const l of state.meta.locations || []) (groups[l.country || 'No country yet'] ||= []).push(l);
+  return Object.entries(groups).map(([country, list]) => `<optgroup label="${esc(country)}">${list
+    .map((l) => `<option value="${esc(l.name)}" ${l.name === selected ? 'selected' : ''}>${esc(l.name)}${l.region ? ` · ${esc(l.region)}` : ''}</option>`).join('')}</optgroup>`).join('');
+}
+
+function studiosHtml(studios) {
+  if (!studios.length) return '<p class="muted">No studios yet.</p>';
+  const byCountry = {};
+  for (const s of studios) (byCountry[s.country || 'No country yet'] ||= []).push(s);
+  return Object.entries(byCountry).map(([country, list]) => `<div class="studio-country"><div class="studio-country-name">${esc(country)}</div>
+    ${list.map((s) => `<div class="studio-row"><div><b>${esc(s.name)}</b><div class="muted small">${esc(s.region || 'No city/region')} · ${s.members} member${s.members === 1 ? '' : 's'}</div></div>
+      <button class="btn btn-ghost small" type="button" data-edit-studio="${esc(s.name)}">Edit</button></div>`).join('')}</div>`).join('');
+}
+
+function openStudioDialog(s, editing, done) {
+  const countries = state.meta.countries || ['Philippines', 'Indonesia', 'Vietnam'];
+  openModal(editing ? `Edit ${s.name}` : 'Add studio', `
+    <label class="field"><span>Studio name <em>*</em></span><input type="text" name="name" value="${esc(s.name)}" placeholder="e.g. Studio Hanoi"></label>
+    <label class="field"><span>Country <em>*</em></span><input type="text" name="country" list="countryList" value="${esc(s.country || '')}" placeholder="Philippines, Indonesia, Vietnam…">
+      <datalist id="countryList">${countries.map((c) => `<option value="${esc(c)}">`).join('')}</datalist></label>
+    <label class="field"><span>City / region <em>*</em></span><input type="text" name="region" value="${esc(s.region || '')}" placeholder="e.g. Manila, CDO, Bali, Hanoi"></label>
+    <p class="muted small" style="margin:0">Tickets from this studio are grouped under this country and city on the dashboard, and go to the country's tab in the Google Sheet.</p>`,
+  async (form) => {
+    await api('/api/studios', { method: 'POST', body: { name: form.name.value, country: form.country.value, region: form.region.value, original: editing ? s.name : '' } });
+    toast(editing ? 'Studio saved' : 'Studio added');
+    state.meta = await api('/api/meta');
+    done();
+  }, editing ? 'Save' : 'Add studio');
+}
+
+function openMemberDialog(u, done) {
+  const roles = ['SD', 'SPC', 'SPL', 'QC', 'ADMIN'];
+  openModal(`Edit ${u.name}`, `
+    <label class="field"><span>Full name <em>*</em></span><input type="text" name="name" value="${esc(u.name)}"></label>
+    <label class="field"><span>Email</span><input type="text" name="email" inputmode="email" value="${esc(u.email || '')}"></label>
+    <label class="field"><span>Role <em>*</em></span><select name="role">${roles.map((r) => `<option value="${r}" ${r === u.role ? 'selected' : ''}>${esc(ROLE_NAMES[r])}</option>`).join('')}</select></label>
+    <label class="field" data-studio-field><span>Studio <em>*</em></span><select name="studio"><option value="">Choose a studio…</option>${studioOptions(u.studio)}</select></label>
+    <label class="field"><span>Job title (optional)</span><input type="text" name="title" value="${esc(u.title || '')}"></label>`,
+  async (form) => {
+    await api(`/api/team/${u.id}`, { method: 'PATCH', body: { name: form.name.value, email: form.email.value, role: form.role.value, studio: form.studio.value, title: form.title.value } });
+    toast(`${form.name.value} updated`);
+    done();
+  }, 'Save', (form) => {
+    const sync = () => ($('[data-studio-field]', form).hidden = !['SD', 'SPC', 'SPL'].includes(form.role.value));
+    form.role.onchange = sync;
+    sync();
+  });
+}
+
 async function renderTeam(view) {
   const me = state.me;
-  const [{ users, addableRoles, companyDomains }, requests] = await Promise.all([api('/api/team'), api('/api/access-requests')]);
+  const [{ users, addableRoles, companyDomains }, requests, studios] = await Promise.all([
+    api('/api/team'), api('/api/access-requests'), me.role === 'ADMIN' ? api('/api/studios') : Promise.resolve([]),
+  ]);
   const isAdmin = me.role === 'ADMIN';
   const studioRoles = ['SD', 'SPC', 'SPL'];
   const domains = companyDomains.map((d) => `@${d}`).join(', ');
@@ -434,8 +489,8 @@ async function renderTeam(view) {
           <label class="field"><span>Role <em>*</em></span>
             <select name="role">${addableRoles.map((r) => `<option value="${r}">${esc(ROLE_NAMES[r])}</option>`).join('')}</select></label>
           <label class="field" data-studio-field><span>Studio <em>*</em></span>
-            ${isAdmin ? `<input type="text" name="studio" list="studioList" placeholder="Choose or type a new studio">
-              <datalist id="studioList">${state.meta.studios.map((s) => `<option value="${esc(s)}">`).join('')}</datalist>`
+            ${isAdmin ? `<select name="studio"><option value="">Choose a studio…</option>${studioOptions('')}</select>
+              <small class="muted">New studio? Add it under Studios below first.</small>`
               : `<input type="text" name="studio" value="${esc(me.studio)}" readonly>`}</label>
           ${isAdmin ? '<label class="field"><span>Job title (optional)</span><input type="text" name="title" maxlength="120" placeholder="e.g. Admin - Studio QC"></label>' : ''}
           <button class="btn btn-primary btn-lg" type="submit">${icon.plus} Add user</button>
@@ -451,8 +506,18 @@ async function renderTeam(view) {
           <button class="btn" type="button" data-import>Import</button>
         </div>
       </div>` : ''}
+      ${isAdmin ? `<div class="card" id="studios"><div class="card-head"><h2>Studios</h2><button class="btn small" type="button" data-add-studio>${icon.plus} Add studio</button></div>
+        <div class="card-body studio-list">${studiosHtml(studios)}</div></div>` : ''}
       </div>
     </div>`;
+
+  // Studios: add / edit (country + city/region drive the dashboard filters and the sheet tabs).
+  $('#studios')?.addEventListener('click', (e) => {
+    const edit = e.target.closest('[data-edit-studio]');
+    if (!edit && !e.target.closest('[data-add-studio]')) return;
+    const s = edit ? studios.find((x) => x.name === edit.dataset.editStudio) : { name: '', country: '', region: '' };
+    openStudioDialog(s, Boolean(edit), () => renderTeam(view));
+  });
 
   $('#importRoster [data-import]')?.addEventListener('click', async () => {
     const box = $('#importRoster');
@@ -538,12 +603,14 @@ async function renderTeam(view) {
         <td>${esc(ROLE_NAMES[u.role])}</td>
         <td class="hide-sm">${esc(u.studio || '—')}</td>
         <td class="signin-cell">${signIn(u)}</td>
-        <td style="text-align:right">${u.source !== 'roster' && u.can_manage && u.id !== me.id ? `<button class="btn btn-ghost small" data-toggle="${u.id}" data-active="${u.active ? 0 : 1}">${u.active ? 'Deactivate' : 'Reactivate'}</button>` : ''}</td>
+        <td style="text-align:right;white-space:nowrap">${isAdmin && u.id !== me.id ? `<button class="btn btn-ghost small" data-edit="${u.id}">Edit</button>` : ''}${u.source !== 'roster' && u.can_manage && u.id !== me.id ? `<button class="btn btn-ghost small" data-toggle="${u.id}" data-active="${u.active ? 0 : 1}">${u.active ? 'Deactivate' : 'Reactivate'}</button>` : ''}</td>
       </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No one matches.</div>';
   };
   draw();
   $('.search', list).oninput = (e) => { q = e.target.value; draw(); };
   list.onclick = async (e) => {
+    const edit = e.target.closest('[data-edit]');
+    if (edit) return openMemberDialog(users.find((x) => x.id === Number(edit.dataset.edit)), () => renderTeam(view));
     const login = e.target.closest('[data-login]');
     if (login) {
       try {

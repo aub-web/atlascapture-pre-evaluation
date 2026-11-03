@@ -48,4 +48,28 @@ async function getMeta(id) {
   return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
 }
 
-module.exports = { CHUNK_SIZE, putChunk, getChunk, putMeta, getMeta };
+// Removes a stored file (all chunks + metadata). Used when admins archive media after exporting it.
+async function deleteFile(id) {
+  if (blobsAvailable()) {
+    const store = blobStore();
+    const meta = await store.get(`${id}/meta`, { type: 'json' });
+    for (let n = 0; n < (meta?.chunks || 0); n++) await store.delete(`${id}/${n}`);
+    return store.delete(`${id}/meta`);
+  }
+  fs.rmSync(dirFor(id), { recursive: true, force: true });
+}
+
+// Small JSON documents (export manifests), kept beside the media under "exports/<id>".
+async function putDoc(key, data) {
+  if (blobsAvailable()) return blobStore().setJSON(`exports/${key}`, data);
+  fs.mkdirSync(path.join(DATA_DIR, 'exports'), { recursive: true });
+  fs.writeFileSync(path.join(DATA_DIR, 'exports', `${key.replace(/[^a-zA-Z0-9-]/g, '')}.json`), JSON.stringify(data));
+}
+
+async function getDoc(key) {
+  if (blobsAvailable()) return blobStore().get(`exports/${key}`, { type: 'json' });
+  const file = path.join(DATA_DIR, 'exports', `${key.replace(/[^a-zA-Z0-9-]/g, '')}.json`);
+  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
+}
+
+module.exports = { CHUNK_SIZE, putChunk, getChunk, putMeta, getMeta, deleteFile, putDoc, getDoc };
