@@ -75,6 +75,15 @@ You can also offer "Sign in with Google" alongside email codes. The same access 
 
 You can add projects besides EgoExo in `src/projects.js`. The form checklist, media slots and QC checks are all generated from that file.
 
+## Google Sheet log (one tab per country)
+
+Every ticket is mirrored into the **QA/QC TICKETING_DB** spreadsheet: one row per ticket, updated on submit, review, return, resubmit and approve, in the tab for the studio's country (`country` on each studio in the roster: Philippines, Indonesia, …). The app's own database stays the source of truth; the sheet is for viewing, filtering and sharing.
+
+1. In the spreadsheet: **Extensions → Apps Script**, paste `scripts/google-sheets-sync.gs`, and set `SECRET` to the site's `SHEETS_WEBHOOK_SECRET`.
+2. **Deploy → New deployment → Web app**, Execute as *Me*, access *Anyone*. Copy the web app URL.
+3. Set it as `SHEETS_WEBHOOK_URL` in the site's environment variables and redeploy.
+4. To backfill existing tickets, an admin can call `POST /api/admin/sheets-resync`.
+
 ## Deploying (Netlify)
 
 `netlify.toml` configures everything: `public/` is served from Netlify's CDN, `/api/*` runs in the `api` Netlify Function, and `/media/*` is streamed by an edge function from **Netlify Blobs**. Data lives in **Netlify DB** (Postgres).
