@@ -11,7 +11,7 @@ const ROLE_NAMES = { SD: 'Set Director', QC: 'QC Reviewer', SPL: 'Studio Project
 const roleLabel = (u) => u.title || ROLE_NAMES[u.role];
 
 // Atlas Capture logo (public/logo-mark.svg) in the header and on the start/login pages.
-const brandHtml = () => '<img class="brand-logo" src="/logo-mark.svg" alt=""><span class="brand-text"><b>atlas capture</b><small>Setup QC</small></span>';
+const brandHtml = () => '<img class="brand-logo" src="/logo-mark.svg" alt=""><span class="brand-text"><b>atlas capture</b><small>QA/QC Team</small></span>';
 const heroLogoHtml = () => '<div class="hero-logo"><img src="/logo-mark.svg" alt="Atlas Capture"><span>atlas capture</span></div>';
 const STATUS_ORDER = ['pending', 'reviewing', 'returned', 'approved'];
 
