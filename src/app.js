@@ -44,16 +44,36 @@ class HttpError extends Error {
 
 // ---------- Secret (sessions, codes, media links) ----------
 
-let SECRET = process.env.SESSION_SECRET;
-if (!SECRET) {
-  if (HOSTED) throw new Error('SESSION_SECRET must be set in the Netlify environment variables');
+// Online, SESSION_SECRET must come from the environment; locally it's generated into data/.secret.
+// A missing secret fails requests (not module load), so /healthz can still report the setup status.
+let SECRET = process.env.SESSION_SECRET || null;
+if (!SECRET && !HOSTED) {
   const secretFile = path.join(DATA_DIR, '.secret');
   fs.mkdirSync(DATA_DIR, { recursive: true });
   if (fs.existsSync(secretFile)) SECRET = fs.readFileSync(secretFile, 'utf8');
   else fs.writeFileSync(secretFile, (SECRET = crypto.randomBytes(32).toString('hex')));
 }
+function secret() {
+  if (!SECRET) throw Object.assign(new HttpError(500, 'Server setup incomplete: SESSION_SECRET is not set. See /healthz.'), { expose: true });
+  return SECRET;
+}
 
-const hmac = (value) => crypto.createHmac('sha256', SECRET).update(String(value)).digest('base64url');
+// Setup status for /healthz: which settings are present (names only, never values).
+function setupStatus() {
+  const has = (k) => Boolean(String(process.env[k] || '').trim());
+  const settings = {
+    SESSION_SECRET: Boolean(SECRET),
+    DATABASE: has('NETLIFY_DATABASE_URL') || has('DATABASE_URL') || !HOSTED,
+    BOOTSTRAP_ADMINS: has('BOOTSTRAP_ADMINS'),
+    APP_URL: has('APP_URL'),
+    SITE_PASSWORD: has('SITE_PASSWORD'),
+    SMTP: has('SMTP_HOST') && has('SMTP_USER') && has('SMTP_PASS'),
+  };
+  const required = HOSTED ? ['SESSION_SECRET', 'DATABASE'] : [];
+  return { ok: required.every((k) => settings[k]), missingRequired: required.filter((k) => !settings[k]), settings };
+}
+
+const hmac = (value) => crypto.createHmac('sha256', secret()).update(String(value)).digest('base64url');
 const sign = (v) => `${v}.${hmac(v)}`;
 // Short tag of the user's email (or name when there is none) bound into the session cookie.
 const sessionTag = (user) => hmac(`user:${String(user.email || user.name).toLowerCase()}`).slice(0, 12);
@@ -95,7 +115,11 @@ const unlessParsed = (parser) => (req, res, next) => (req.parsedByHost ? next() 
 app.set('trust proxy', true);
 
 // Health check for the host (registered before the site password so it always answers).
-app.get('/healthz', (req, res) => res.type('text').send('ok'));
+app.get('/healthz', (req, res) => {
+  const status = setupStatus();
+  if (status.ok && !('details' in req.query)) return res.type('text').send('ok');
+  res.status(status.ok ? 200 : 500).json(status);
+});
 
 // Optional shared password in front of the site (SITE_PASSWORD), for test deployments shared by link.
 // A plain form + signed cookie rather than HTTP Basic auth: in-app browsers never show that dialog.
@@ -331,7 +355,7 @@ app.get('/api/auth-config', (req, res) =>
 // Codes are stored hashed, expire after 10 minutes and allow 5 attempts. Until SMTP is configured
 // the code is returned to the page (test mode) because there is no way to email it.
 
-const codeHash = (email, code) => crypto.createHmac('sha256', SECRET).update(`${email}:${code}`).digest('hex');
+const codeHash = (email, code) => crypto.createHmac('sha256', secret()).update(`${email}:${code}`).digest('hex');
 const normEmail = (e) => String(e || '').trim().toLowerCase();
 const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 const userByEmail = (email) => one('SELECT * FROM users WHERE lower(email) = $1 ORDER BY active DESC, id LIMIT 1', [email]);
@@ -909,7 +933,7 @@ app.use((err, req, res, next) => {
     message = 'That upload part is too large';
   }
   if (status >= 500) console.error(err);
-  res.status(status).json({ error: status >= 500 ? 'Something went wrong' : message, ...(err.code === 'site_password' ? { code: err.code } : {}) });
+  res.status(status).json({ error: status >= 500 && !err.expose ? 'Something went wrong' : message, ...(err.code === 'site_password' ? { code: err.code } : {}) });
 });
 
 module.exports = { app, COMPANY_DOMAINS, DEV_LOGIN };
