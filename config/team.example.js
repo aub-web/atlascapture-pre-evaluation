@@ -9,6 +9,7 @@ const STUDIOS = [
   {
     name: 'Studio Example',
     region: 'Example City',
+    country: 'Philippines',
     members: [
       // [name, email, role]
       ['Sample Lead', 'lead@example.com', 'SPL'],

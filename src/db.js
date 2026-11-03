@@ -232,6 +232,13 @@ async function syncRoster(roster, { deactivateMissing }) {
         }
       }
     }
+    // Studio → country, used to pick the Google Sheet tab for each ticket.
+    const countries = Object.fromEntries((roster.STUDIOS || []).filter((s) => s.name && s.country).map((s) => [s.name, s.country]));
+    if (Object.keys(countries).length) {
+      const prev = JSON.parse((await c.one("SELECT value FROM meta WHERE key = 'studio_countries'"))?.value || '{}');
+      await c.run("INSERT INTO meta (key, value) VALUES ('studio_countries', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        [JSON.stringify({ ...prev, ...countries })]);
+    }
     return { total: people.length, added, updated, deactivated };
   };
   // During startup the backend exists but ready() hasn't resolved yet, so go through it directly.

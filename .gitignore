@@ -7,3 +7,5 @@ config/team.json
 # Netlify settings to import (contains secrets)
 config/netlify.env
 .netlify/
+# Personal Apps Script copy with the secret filled in
+config/google-sheets-sync.gs

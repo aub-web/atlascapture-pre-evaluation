@@ -11,6 +11,7 @@ const { q, one, run, tx, now, syncRoster, DATA_DIR } = require('./db');
 const { PROJECTS, getProject } = require('./projects');
 const { notify, sendMail, mailEnabled } = require('./notify');
 const storage = require('./storage');
+const { syncTicketToSheet, sheetsEnabled } = require('./sheets');
 const { HOSTED } = require('./env');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
@@ -68,6 +69,7 @@ function setupStatus() {
     APP_URL: has('APP_URL'),
     SITE_PASSWORD: has('SITE_PASSWORD'),
     SMTP: has('SMTP_HOST') && has('SMTP_USER') && has('SMTP_PASS'),
+    GOOGLE_SHEET: has('SHEETS_WEBHOOK_URL') && has('SHEETS_WEBHOOK_SECRET'),
   };
   const required = HOSTED ? ['SESSION_SECRET', 'DATABASE'] : [];
   return { ok: required.every((k) => settings[k]), missingRequired: required.filter((k) => !settings[k]), settings };
@@ -599,6 +601,7 @@ async function createTicket(submitter, b, channel) {
     type: 'submitted',
     message: `${code} submitted by ${submitter.name} (${submitter.studio}) is awaiting QC review`,
   });
+  await syncTicketToSheet(ticketId);
   return ticketId;
 }
 
@@ -620,6 +623,7 @@ async function resubmitTicket(t, user, body, channel) {
     message: `${t.code} was resubmitted by ${user.name} (round ${submissionNo})`,
     detail: note,
   });
+  await syncTicketToSheet(t.id);
 }
 
 app.post('/api/tickets', requireAuth, requireRole('SD'), async (req, res) => {
@@ -645,6 +649,7 @@ app.post('/api/tickets/:id/start-review', requireAuth, requireRole('QC'), async 
       await c.run("UPDATE tickets SET status = 'reviewing', reviewer_id = $1, updated_at = $2 WHERE id = $3", [req.user.id, now(), t.id]);
       await logHistory(c, t.id, req.user.id, 'review_started');
     });
+    await syncTicketToSheet(t.id);
   }
   res.json({ ok: true });
 });
@@ -675,6 +680,7 @@ app.post('/api/tickets/:id/approve', requireAuth, requireRole('QC', 'ADMIN'), as
     message: `${t.code} approved by ${req.user.name}: filming can begin`,
     detail: `Your setup for "${t.task_name}" (${t.scene}) passed QC. You have the green light to start the recording session.`,
   });
+  await syncTicketToSheet(t.id);
   res.json({ ok: true });
 });
 
@@ -706,6 +712,7 @@ app.post('/api/tickets/:id/return', requireAuth, requireRole('QC', 'ADMIN'), asy
     message: `${t.code} (${t.sd_name}) was returned by QC and needs corrections`,
     detail: comment,
   });
+  await syncTicketToSheet(t.id);
   res.json({ ok: true });
 });
 
@@ -828,6 +835,15 @@ app.patch('/api/team/:id', requireAuth, requireRole('ADMIN', 'SPL'), async (req,
   if (target.source === 'roster') throw new HttpError(409, 'People from the roster are managed by re-importing the roster');
   await run('UPDATE users SET active = $1 WHERE id = $2', [req.body?.active ? 1 : 0, target.id]);
   res.json({ ok: true });
+});
+
+// Re-sends every ticket to the Google Sheet (e.g. after connecting the sheet). Admins only.
+app.post('/api/admin/sheets-resync', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  if (!sheetsEnabled()) throw new HttpError(409, 'The Google Sheet is not connected (SHEETS_WEBHOOK_URL / SHEETS_WEBHOOK_SECRET)');
+  const ids = (await q('SELECT id FROM tickets ORDER BY id')).map((r) => r.id);
+  let synced = 0;
+  for (const id of ids) if (await syncTicketToSheet(id)) synced++;
+  res.json({ total: ids.length, synced });
 });
 
 // ---------- Metrics (SPL oversight) ----------
