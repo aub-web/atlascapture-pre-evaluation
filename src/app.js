@@ -69,6 +69,7 @@ function setupStatus() {
     APP_URL: has('APP_URL'),
     SITE_PASSWORD: has('SITE_PASSWORD'),
     SMTP: has('SMTP_HOST') && has('SMTP_USER') && has('SMTP_PASS'),
+    EMAIL_VIA_SCRIPT: process.env.MAIL_VIA === 'apps-script',
     GOOGLE_SHEET: has('SHEETS_WEBHOOK_URL') && has('SHEETS_WEBHOOK_SECRET'),
   };
   const required = HOSTED ? ['SESSION_SECRET', 'DATABASE'] : [];

@@ -71,6 +71,7 @@ You can also offer "Sign in with Google" alongside email codes. The same access 
 | `SESSION_SECRET` | Signs sessions, codes and media links. Required online; auto-generated into `data/.secret` locally |
 | `BOOTSTRAP_ADMINS` | Comma-separated emails that are always active admins (lets you sign in to a fresh online database) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Email for sign-in codes and ticket notifications. Without it, codes are shown on screen (test mode) |
+| `MAIL_VIA` | `apps-script` sends email through the Google Sheet Apps Script instead of SMTP (no App Password needed) |
 | `APP_URL` | Public base URL. Used for ticket links in emails; an `https` URL also marks the session cookie Secure |
 
 You can add projects besides EgoExo in `src/projects.js`. The form checklist, media slots and QC checks are all generated from that file.

@@ -9,6 +9,11 @@
 //
 // The site POSTs {secret, country, row}. Each country gets its own tab (created if missing);
 // the ticket's row is updated in place, matched by the Ticket column.
+//
+// It can also send the site's emails (sign-in codes, ticket alerts) when the site sets
+// MAIL_VIA=apps-script: the site POSTs {secret, action: "email", to, bcc, subject, text} and the
+// mail goes out from the Google account that owns this script (no App Password needed).
+// Updating an existing deployment: Deploy → Manage deployments → ✏️ → Version: New version → Deploy.
 
 const SECRET = 'PASTE_SHEETS_WEBHOOK_SECRET_HERE';
 
@@ -24,7 +29,10 @@ function doPost(e) {
   } catch (err) {
     return reply({ ok: false, error: 'invalid JSON' });
   }
-  if (!data || data.secret !== SECRET || !data.row || !data.row.Ticket) return reply({ ok: false, error: 'unauthorized' });
+  if (!data || data.secret !== SECRET) return reply({ ok: false, error: 'unauthorized' });
+  if (data.action === 'email') return sendEmail(data);
+  if (data.action === 'email-check') return reply({ ok: true, email: true, quota: MailApp.getRemainingDailyQuota() });
+  if (!data.row || !data.row.Ticket) return reply({ ok: false, error: 'missing row' });
 
   const lock = LockService.getScriptLock();
   lock.waitLock(30000); // one write at a time, so two updates can't race for the same row
@@ -40,6 +48,16 @@ function doPost(e) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function sendEmail(data) {
+  // One email per recipient, so people never see each other's addresses.
+  const list = [].concat(data.to || [], data.bcc || []).join(',').split(',').map((s) => s.trim()).filter(Boolean);
+  const recipients = list.filter((r, i) => list.indexOf(r) === i);
+  if (!recipients.length) return reply({ ok: false, error: 'no recipients' });
+  if (MailApp.getRemainingDailyQuota() < recipients.length) return reply({ ok: false, error: 'daily email quota reached' });
+  recipients.forEach((to) => MailApp.sendEmail({ to: to, subject: String(data.subject || 'Studio Setup QC'), body: String(data.text || ''), name: 'Studio Setup QC' }));
+  return reply({ ok: true, sent: recipients.length, quota: MailApp.getRemainingDailyQuota() });
 }
 
 function doGet() {

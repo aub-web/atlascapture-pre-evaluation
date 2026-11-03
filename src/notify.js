@@ -19,11 +19,38 @@ if (!smtpMissing.length) {
     auth: { user: process.env.SMTP_USER.trim(), pass: process.env.SMTP_PASS.replace(/\s+/g, '') },
   });
 }
-const mailEnabled = Boolean(transport);
+// Alternative to SMTP: MAIL_VIA=apps-script sends through the Google Sheet's Apps Script web app
+// (scripts/google-sheets-sync.gs), from the account that owns the script. No App Password needed.
+const viaScript = !transport && process.env.MAIL_VIA === 'apps-script' &&
+  Boolean(process.env.SHEETS_WEBHOOK_URL && process.env.SHEETS_WEBHOOK_SECRET);
+const mailEnabled = Boolean(transport) || viaScript;
 const mailFrom = () => process.env.MAIL_FROM || `Studio Setup QC <${process.env.SMTP_USER.trim()}>`;
 
-// Checks the SMTP login and explains common failures. Resolves { ok, message }.
+async function postToScript(payload) {
+  const res = await fetch(process.env.SHEETS_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ secret: process.env.SHEETS_WEBHOOK_SECRET, ...payload }),
+    redirect: 'follow',
+    signal: AbortSignal.timeout(20_000),
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch {}
+  if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status} ${text.slice(0, 120)}`);
+  return data;
+}
+
+// Checks the mail setup and explains common failures. Resolves { ok, message }.
 async function verifyMail() {
+  if (viaScript) {
+    try {
+      const r = await postToScript({ action: 'email-check' });
+      return { ok: true, message: `sending through the Apps Script (${r.quota} emails left today)` };
+    } catch (err) {
+      return { ok: false, message: `Apps Script email check failed: ${err.message}` };
+    }
+  }
   if (!transport) {
     const partial = smtpMissing.length < SMTP_REQUIRED.length;
     return { ok: false, message: partial ? `email is off: ${smtpMissing.join(', ')} not set` : 'email is off: SMTP is not configured' };
@@ -43,9 +70,10 @@ const appLink = (hashPath) => (process.env.APP_URL ? `${process.env.APP_URL.repl
 
 // Sends one email. Resolves false (without throwing) when email isn't configured or sending fails.
 async function sendMail({ to, bcc, subject, text }) {
-  if (!transport) return false;
+  if (!mailEnabled) return false;
   try {
-    await transport.sendMail({ from: mailFrom(), to, bcc, subject, text });
+    if (viaScript) await postToScript({ action: 'email', to, bcc, subject, text });
+    else await transport.sendMail({ from: mailFrom(), to, bcc, subject, text });
     return true;
   } catch (err) {
     console.error('[mail] failed:', err.message);
@@ -64,7 +92,7 @@ async function notify(userIds, { ticketId, type, message, detail, link }) {
       [id, ticketId ?? null, type, message, ts]);
   }
 
-  if (!transport) return;
+  if (!mailEnabled) return;
   const recipients = (await q('SELECT email FROM users WHERE id = ANY($1) AND email IS NOT NULL', [ids])).map((r) => r.email);
   if (!recipients.length) return;
 
