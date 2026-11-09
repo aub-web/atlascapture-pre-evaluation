@@ -90,9 +90,14 @@ function driveSession(data) {
 }
 
 // Run once from the editor (choose authorizeDrive → Run) to grant the Drive permissions.
+// It writes and then trashes a small test file: Apps Script only asks for full Drive access
+// (needed for the uploads) when the code visibly creates files; reading alone gets read-only access.
 function authorizeDrive() {
-  Logger.log('Drive folder: ' + DriveApp.getFolderById(DRIVE_FOLDER_ID).getName());
-  UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/about?fields=user', { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() } });
+  const folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+  const test = folder.createFile('setup-qc-test.txt', 'Studio Setup QC write test - safe to delete');
+  test.setTrashed(true);
+  const res = driveSession({ name: 'setup-qc-session-test.txt', mime: 'text/plain', size: 1 });
+  Logger.log('Drive folder: ' + folder.getName() + ' — upload test: ' + (JSON.parse(res.getContent()).ok ? 'OK' : res.getContent()));
 }
 
 // Run once from the editor to grant the email permission.
