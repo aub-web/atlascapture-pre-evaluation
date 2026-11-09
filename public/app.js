@@ -402,20 +402,43 @@ async function renderHome(view) {
     return ticketList($('#list'), { defaultTab: 'open', columns: ['ticket', 'project', 'sd', 'location', 'status', 'round', 'updated'] });
   }
   if (me.role === 'ADMIN') {
+    // "View as": admins can preview exactly what a QC reviewer (or a studio lead) sees.
+    const people = (await api('/api/team')).users.filter((u) => u.active && ['QC', 'SPL'].includes(u.role));
+    const group = (role, label) => {
+      const list = people.filter((u) => u.role === role);
+      return list.length ? `<optgroup label="${label}">${list.map((u) => `<option value="${u.id}">${esc(u.name)}${u.studio ? ` · ${esc(u.studio)}` : ''}</option>`).join('')}</optgroup>` : '';
+    };
     view.innerHTML = `
       <div class="page-head"><div><h1>All studios overview</h1><p>Setup submissions and QC outcomes across every country, city and studio.</p></div>
-        <button class="btn" id="exportZip" type="button">${icon.download} Export ZIP</button></div>
+        <div class="actions">
+          <label class="view-as"><span>View as</span><select id="viewAs"><option value="">Everyone (admin view)</option>${group('QC', 'QC reviewers')}${group('SPL', 'Studio Project Leads')}</select></label>
+          <button class="btn" id="exportZip" type="button">${icon.download} Export ZIP</button>
+        </div></div>
+      <div id="previewNote"></div>
       <div id="stats"></div>
       <div class="card" id="list"></div>`;
-    renderStats($('#stats'), { byLocation: true });
     let visible = [];
     let currentFilters = {};
     $('#exportZip').onclick = () => openExportDialog(visible, currentFilters);
-    return ticketList($('#list'), {
-      defaultTab: 'all',
-      columns: ['ticket', 'project', 'sd', 'location', 'status', 'round', 'reviewer', 'updated'],
-      onFilter: (rows, f) => { visible = rows; currentFilters = f; },
-    });
+    const load = (asId) => {
+      const person = people.find((u) => String(u.id) === asId);
+      const query = person ? `?as=${person.id}` : '';
+      $('#previewNote').innerHTML = person ? `<div class="banner reviewing preview-banner">${icon.eye.replace(/width="13" height="13"/, 'width="18" height="18"')}<div>
+        <b>Previewing ${esc(person.name)}'s dashboard</b> <span class="muted">(${esc(ROLE_NAMES[person.role])})</span>
+        <div class="muted small">${person.role === 'QC' ? 'This is exactly what they see: tickets waiting for review, plus only the ones they approved or returned. Numbers count only their own reviews.' : 'This is exactly what they see: their studio’s tickets.'}</div></div>
+        <button class="btn small" type="button" data-exit>Back to admin view</button></div>` : '';
+      $('#previewNote [data-exit]')?.addEventListener('click', () => { $('#viewAs').value = ''; load(''); });
+      $('#exportZip').hidden = Boolean(person);
+      renderStats($('#stats'), { byLocation: !person, query });
+      ticketList($('#list'), {
+        defaultTab: person?.role === 'QC' ? 'open' : 'all',
+        query,
+        columns: ['ticket', 'project', 'sd', 'location', 'status', 'round', 'reviewer', 'updated'],
+        onFilter: (rows, f) => { visible = rows; currentFilters = f; },
+      });
+    };
+    $('#viewAs').onchange = (e) => load(e.target.value);
+    return load('');
   }
   view.innerHTML = `
     <div class="page-head"><div><h1>${esc(me.studio)} overview</h1><p>Setup submissions, QC outcomes and tickets that need corrections.</p></div></div>
@@ -425,8 +448,8 @@ async function renderHome(view) {
   return ticketList($('#list'), { defaultTab: 'returned', columns: ['ticket', 'sd', 'status', 'round', 'reviewer', 'updated'] });
 }
 
-async function renderStats(el, { byLocation = false } = {}) {
-  const s = await api('/api/stats');
+async function renderStats(el, { byLocation = false, query = '' } = {}) {
+  const s = await api(`/api/stats${query}`);
   const locationTable = byLocation && s.byLocation?.length ? `
     <div class="card by-location">
       <div class="card-head"><h2>By country and city</h2><span class="muted small">All tickets</span></div>
@@ -449,8 +472,8 @@ async function renderStats(el, { byLocation = false } = {}) {
 
 // Ticket list with status tabs, search and (for everyone but SDs) Country / City / Project filters.
 // `onFilter(rows, filters)` is told whenever the visible rows change (used by Export ZIP).
-async function ticketList(el, { defaultTab, columns, onFilter }) {
-  const tickets = await api('/api/tickets');
+async function ticketList(el, { defaultTab, columns, onFilter, query = '' }) {
+  const tickets = await api(`/api/tickets${query}`);
   const tabs = [
     { id: 'all', label: 'All', match: () => true },
     { id: 'open', label: 'Awaiting review', match: (t) => t.status === 'pending' || t.status === 'reviewing' },
@@ -459,7 +482,10 @@ async function ticketList(el, { defaultTab, columns, onFilter }) {
   ];
   let tab = defaultTab;
   let q = '';
-  const filters = { country: '', region: '', project: '' };
+  const filters = { country: '', region: '', project: '', reviewer: '' };
+  // QC reviewer filter (admins): who checked each ticket.
+  const reviewers = [...new Set(tickets.map((t) => t.reviewer_name).filter(Boolean))].sort();
+  const showReviewer = state.me.role === 'ADMIN' && !query;
   const showFilters = state.me.role !== 'SD';
   const cols = {
     ticket: ['Ticket', (t) => `<div class="code">${esc(t.code)}</div><div class="sub">${esc(t.task_name)} · ${esc(t.scene)}</div>`],
@@ -493,10 +519,12 @@ async function ticketList(el, { defaultTab, columns, onFilter }) {
       <select data-f="country" aria-label="Country"><option value="">All countries</option>${countries.map((c) => option(c, c, '')).join('')}</select>
       <select data-f="region" aria-label="City or region">${regionOptions()}</select>
       ${projects.length > 1 ? `<select data-f="project" aria-label="Project"><option value="">All projects</option>${projects.map(([id, name]) => option(id, name, '')).join('')}</select>` : ''}
+      ${showReviewer ? `<select data-f="reviewer" aria-label="QC reviewer"><option value="">All QC reviewers</option><option value="__none">Not reviewed yet</option>${reviewers.map((r) => option(r, r, '')).join('')}</select>` : ''}
       <span class="filter-count muted small"></span>
     </div>` : ''}
     <div class="list-body"></div>`;
-  const inFilters = (t) => (!filters.country || t.country === filters.country) && (!filters.region || t.region === filters.region) && (!filters.project || t.project === filters.project);
+  const inFilters = (t) => (!filters.country || t.country === filters.country) && (!filters.region || t.region === filters.region) && (!filters.project || t.project === filters.project)
+    && (!filters.reviewer || (filters.reviewer === '__none' ? !t.reviewer_name : t.reviewer_name === filters.reviewer));
   const draw = () => {
     const scoped = tickets.filter(inFilters);
     $('.tabs', el).innerHTML = tabs.map((t) => `<button class="${t.id === tab ? 'on' : ''}" data-tab="${t.id}">${t.label} <span class="n">${scoped.filter(t.match).length}</span></button>`).join('');
@@ -844,6 +872,7 @@ async function renderTicket(view, id) {
         <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><h1>${esc(t.code)}</h1>${pill(t)}</div>
         <p>${esc(t.task_name)} · ${esc(t.scene)} · ${esc(t.project_name)}</p>
       </div>
+      ${me.role === 'ADMIN' ? `<button class="btn btn-danger" id="deleteTicket" type="button">Delete ticket</button>` : ''}
     </div>
     <div class="grid-2">
       <div class="stack">
@@ -899,6 +928,17 @@ async function renderTicket(view, id) {
     </div>`;
 
   bindLightbox(view);
+  // Admins: delete with confirmation (type the ticket code).
+  $('#deleteTicket')?.addEventListener('click', () => openModal(`Delete ${t.code}?`, `
+    <p style="margin:0">This permanently deletes <b>${esc(t.code)}</b> (${esc(t.task_name)} · ${esc(t.studio || '')}), its photos/videos, history and notifications. It can't be undone.</p>
+    <p class="muted small" style="margin:0">The Google Sheet keeps its row, marked "Deleted". Copies already in Google Drive or exported ZIPs aren't removed.</p>
+    <label class="field"><span>Type <b>${esc(t.code)}</b> to confirm</span><input type="text" name="confirm" autocomplete="off"></label>`,
+  async (form) => {
+    if (form.confirm.value.trim().toUpperCase() !== t.code) throw new Error(`Type ${t.code} exactly to confirm`);
+    await api(`/api/tickets/${t.id}`, { method: 'DELETE' });
+    toast(`${t.code} deleted`);
+    location.hash = '#/';
+  }, 'Delete permanently'));
   if (canReview) bindQcPanel(t, project);
   if (canResubmit) {
     const fields = mountSubmissionFields($('#resubFields'), project, { boundarySize: t.boundary_size });

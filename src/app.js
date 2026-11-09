@@ -11,7 +11,7 @@ const { q, one, run, tx, now, syncRoster, DATA_DIR } = require('./db');
 const { loadProjects, getProject, listProjects, saveProject, setProjectActive, toGuidelineFile, fromGuidelineFile, TEMPLATE } = require('./projects');
 const { notify, sendMail, mailEnabled } = require('./notify');
 const storage = require('./storage');
-const { syncTicketToSheet, sheetsEnabled } = require('./sheets');
+const { syncTicketToSheet, sheetsEnabled, markTicketDeletedInSheet, loadLastReturn } = require('./sheets');
 const { queueTicketMedia, processDriveJobs, driveStatus, retryFailed, driveEnabled } = require('./drive');
 const { buildManifest, streamZip } = require('./exports');
 
@@ -599,10 +599,47 @@ app.get('/api/meta', requireAuth, async (req, res) => {
 
 // ---------- Tickets ----------
 
+// Admins can preview another person's dashboard ("View as", e.g. a QC reviewer) with ?as=<userId>.
+// Everyone else always gets their own view.
+async function viewerFor(req) {
+  if (req.user.role !== 'ADMIN' || !req.query.as) return req.user;
+  const target = await one('SELECT * FROM users WHERE id = $1 AND active = 1', [Number(req.query.as) || 0]);
+  if (!target) throw new HttpError(404, 'That person was not found');
+  return target;
+}
+
 app.get('/api/tickets', requireAuth, async (req, res) => {
+  const viewer = await viewerFor(req);
   const params = [];
-  const rows = await q(`${TICKET_SELECT} WHERE ${visibility(req.user, params)} ORDER BY t.updated_at DESC LIMIT 1000`, params);
+  const rows = await q(`${TICKET_SELECT} WHERE ${visibility(viewer, params)} ORDER BY t.updated_at DESC LIMIT 1000`, params);
   res.json(rows.map(shapeTicket));
+});
+
+// Deletes a ticket with its media, history and notifications (admins only). Stored files are
+// removed too; the Google Sheet keeps the row, marked "Deleted".
+app.delete('/api/tickets/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const t = await loadTicket(req.user, req.params.id);
+  const lastReturn = await loadLastReturn(t.id); // for the sheet row, read before the history goes
+  const media = await q('SELECT id, storage_key FROM media WHERE ticket_id = $1', [t.id]);
+  const keys = media.map((m) => m.storage_key);
+  await tx(async (c) => {
+    await c.run('DELETE FROM drive_jobs WHERE media_id = ANY($1)', [media.map((m) => m.id)]);
+    await c.run('DELETE FROM notifications WHERE ticket_id = $1', [t.id]);
+    await c.run('DELETE FROM history WHERE ticket_id = $1', [t.id]);
+    await c.run('DELETE FROM media WHERE ticket_id = $1', [t.id]);
+    await c.run('DELETE FROM uploads WHERE id = ANY($1)', [keys]);
+    await c.run('DELETE FROM tickets WHERE id = $1', [t.id]);
+  });
+  for (const key of keys) {
+    try {
+      await storage.deleteFile(key);
+    } catch (err) {
+      console.error(`[delete] file ${key}:`, err.message);
+    }
+  }
+  await markTicketDeletedInSheet(t, lastReturn, req.user);
+  console.log(`[delete] ${t.code} deleted by ${req.user.email}`);
+  res.json({ ok: true, code: t.code });
 });
 
 // Shared by the signed-in form (channel 'app') and "Submit a photo" without login (channel 'quick').
@@ -1044,13 +1081,14 @@ app.post('/api/admin/drive/run', requireAuth, requireRole('ADMIN'), async (req, 
 // ---------- Metrics (SPL oversight) ----------
 
 app.get('/api/stats', requireAuth, requireRole('SPL', 'SPC', 'QC', 'ADMIN'), async (req, res) => {
+  const viewer = await viewerFor(req);
   const params = [];
   const tickets = await q(`SELECT t.id, t.status, t.studio, t.submission_no, st.country, st.region
-    FROM tickets t LEFT JOIN studios st ON st.name = t.studio WHERE ${visibility(req.user, params)}`, params);
+    FROM tickets t LEFT JOIN studios st ON st.name = t.studio WHERE ${visibility(viewer, params)}`, params);
   let history = await q(`SELECT ticket_id, action, user_id, created_at FROM history
     WHERE action IN ('submitted','resubmitted','approved','returned') AND ticket_id = ANY($1) ORDER BY id`, [tickets.map((t) => t.id)]);
   // A QC reviewer's numbers only count their own decisions.
-  if (req.user.role === 'QC') history = history.filter((h) => !['approved', 'returned'].includes(h.action) || h.user_id === req.user.id);
+  if (viewer.role === 'QC') history = history.filter((h) => !['approved', 'returned'].includes(h.action) || h.user_id === viewer.id);
 
   const lastSubmit = {};
   let decisions = 0, totalMs = 0, approvals = 0, returns = 0;

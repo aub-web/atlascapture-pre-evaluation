@@ -468,3 +468,9 @@ label.btn { cursor: pointer; }
 .archive-box summary { cursor: pointer; font-weight: 600; font-size: 13px; }
 .archived-note { display: flex; gap: 10px; padding: 14px; border-radius: 9px; background: var(--surface-2); }
 .archived-note svg { flex: none; color: var(--muted); margin-top: 2px; }
+
+/* ---------- View as (admin preview) ---------- */
+.view-as { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.view-as select { width: auto; min-width: 220px; height: 36px; }
+.preview-banner { margin-bottom: 16px; align-items: center; }
+.preview-banner > div { flex: 1; }
