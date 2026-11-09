@@ -41,6 +41,8 @@ function openModal(title, html, onSubmit, submitLabel = 'Save', onMount) {
 
 const fmtBytes = (n) => (n > 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(2)} GB` : n > 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
+const driveLine = (d) => `Google Drive copies: ${d.done} done${d.waiting ? `, ${d.waiting} in progress` : ''}${d.failed ? `, <span style="color:var(--red)">${d.failed} failed</span>` : ''}.`;
+
 async function openExportDialog(rows, filters = {}) {
   if (!rows.length) return toast('No tickets match the current filters', 'error');
   const approved = rows.filter((t) => t.status === 'approved');
@@ -52,7 +54,8 @@ async function openExportDialog(rows, filters = {}) {
     <p style="margin:0"><b>${rows.length}</b> ticket${rows.length === 1 ? '' : 's'} · <span class="muted">${esc(scope)}${filters.tab && filters.tab !== 'all' ? ` · ${esc(filters.tab)}` : ''}</span></p>
     <p class="muted small" style="margin:0">The ZIP has <b>tickets.csv</b> (every entry, status and latest QC feedback) and the photos/videos in a folder per country, named <b>Country_Project_BusinessName_TICKET_View</b>. Use the dashboard filters to choose what goes in.</p>
     <label class="check on" style="padding:9px 11px"><input type="checkbox" name="includeMedia" checked><div class="small">Include photos and videos</div></label>
-    ${drive?.enabled ? `<p class="muted small" style="margin:0">Google Drive copies: ${drive.done} done${drive.waiting ? `, ${drive.waiting} in progress` : ''}${drive.failed ? `, <span style="color:var(--red)">${drive.failed} failed</span>` : ''}.</p>` : ''}
+    ${drive?.enabled ? `<div class="small" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="muted" data-drive-status>${driveLine(drive)}</span>
+      <button class="btn small" type="button" data-drive-copy>Copy files to Drive</button></div>` : ''}
     <div data-result hidden></div>
     ${approved.length ? `<details class="archive-box"><summary>Free up storage after exporting</summary>
       <p class="small" style="margin:8px 0">Remove the photos/videos of the <b>${approved.length} approved</b> ticket${approved.length === 1 ? '' : 's'} in this selection from the site's storage. Tickets, history and feedback stay; the files remain in your ZIP${drive?.enabled ? ' and in Google Drive' : ''}.</p>
@@ -69,6 +72,27 @@ async function openExportDialog(rows, filters = {}) {
     location.href = result.url;
     return 'keep'; // stay open to show the link and the archive option
   }, 'Create ZIP');
+
+  // Copies any photos/videos not yet in Drive (e.g. uploaded before Drive was switched on) and retries failed ones.
+  $('[data-drive-copy]', form)?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Copying…';
+    try {
+      let s = await api('/api/admin/drive/run', { method: 'POST', body: { queueExisting: true, retryFailed: true } });
+      for (let i = 0; s.waiting && i < 30; i++) {
+        $('[data-drive-status]', form).innerHTML = driveLine(s);
+        s = await api('/api/admin/drive/run', { method: 'POST', body: {} });
+      }
+      $('[data-drive-status]', form).innerHTML = driveLine(s);
+      toast(s.failed ? `Drive: ${s.failed} file(s) failed — ${s.lastError?.error || 'see status'}` : s.waiting ? 'Still copying in the background' : 'All files are in Google Drive', s.failed ? 'error' : undefined);
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Copy files to Drive';
+    }
+  });
 
   $('[data-archive]', form)?.addEventListener('click', async () => {
     if (!form.confirmArchive.checked) return toast('Tick the confirmation first', 'error');
