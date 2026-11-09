@@ -16,9 +16,7 @@
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
-  # pg is shipped as a real node_module: the scheduled function (drive-sync.mjs) is an ES module and
-  # esbuild left db.js's lazy require('pg') unresolved there ("Cannot find module 'pg'").
-  external_node_modules = ["pg-native", "pg"]
+  external_node_modules = ["pg-native"]
 
 [[redirects]]
   from = "/api/*"

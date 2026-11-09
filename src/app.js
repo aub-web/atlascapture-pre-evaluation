@@ -139,6 +139,19 @@ app.get('/healthz', (req, res) => {
   res.status(status.ok ? 200 : 500).json(status);
 });
 
+// Called every 5 minutes by the scheduled function (netlify/functions/drive-sync.mjs) to continue
+// Drive copies. Signed with SESSION_SECRET and time-limited; registered before the site password.
+app.post('/api/internal/drive-tick', async (req, res) => {
+  const [ts, sig] = String(req.headers['x-drive-tick'] || '').split('.');
+  const expected = Buffer.from(hmac(`drive-tick:${ts}`));
+  const given = Buffer.from(String(sig || ''));
+  if (!(Math.abs(Date.now() / 1000 - Number(ts)) < 300 && given.length === expected.length && crypto.timingSafeEqual(given, expected))) {
+    throw new HttpError(403, 'Forbidden');
+  }
+  const result = await processDriveJobs(7000);
+  res.json({ ...result, ...(await driveStatus()) });
+});
+
 // Optional shared password in front of the site (SITE_PASSWORD), for test deployments shared by link.
 // A plain form + signed cookie rather than HTTP Basic auth: in-app browsers never show that dialog.
 // The API answers 401 with code "site_password" so the page can show the password form itself.
