@@ -1,7 +1,7 @@
 'use strict';
 
-// Pages added on top of app.js: the start page, "Submit a photo" (no login) with its
-// submission log, the public ticket view, and Team management. Uses helpers from app.js.
+// Pages added on top of app.js: email sign-in, the start page, and Team management.
+// Uses helpers from app.js.
 
 // ---------- Email sign-in (one-time code + access requests) ----------
 
@@ -105,7 +105,7 @@ function mountEmailSignIn(el) {
 
   const stepRequest = async (email) => {
     const opts = await api('/api/public/options');
-    const studios = [...new Set(opts.submitters.map((s) => s.studio))];
+    const studios = opts.studios || [];
     el.innerHTML = `
       <h2>Request access</h2>
       <p class="muted" style="margin:6px 0 14px"><b>${esc(email)}</b> isn't on the team yet. Send a request and an admin or manager will review it. You'll get an email once it's approved.</p>
@@ -179,220 +179,18 @@ async function renderWelcome(view) {
         <div class="card choice">
           <div class="choice-icon">${icon.camera}</div>
           <h2>Submit a photo</h2>
-          <p>No login needed. Choose the project, upload your setup preview, and check QC's feedback in the submission log.</p>
+          <p>For Set Directors. Choose the project, sign in with your email, then upload your setup preview. QC's feedback appears under My tickets.</p>
           <p class="section-title" style="margin:4px 0 8px">Which project?</p>
           <div class="project-picks">${projects.map((p) => `<a class="btn btn-primary btn-lg btn-block" href="#/submit/${p.id}">${esc(p.name)}</a>`).join('')}</div>
         </div>
         <div class="card choice">
           <div class="choice-icon">${icon.user}</div>
           <h2>Log in as a user</h2>
-          <p>For QC reviewers, Studio Project Leads, admins, and Set Directors managing their tickets.</p>
+          <p>For QC reviewers, Studio Project Leads, admins, and Set Directors checking their tickets.</p>
           <a class="btn btn-lg btn-block" href="#/login" style="margin-top:auto">Log in</a>
         </div>
       </div>
     </div>`;
-}
-
-// ---------- Submit a photo (no login) ----------
-
-function submitterOptions(submitters, selected) {
-  const studios = [...new Set(submitters.map((s) => s.studio))];
-  return studios.map((st) => `<optgroup label="${esc(st)}">${submitters.filter((s) => s.studio === st)
-    .map((s) => `<option value="${s.id}" ${String(s.id) === String(selected) ? 'selected' : ''}>${esc(s.name)} · ${esc(ROLE_NAMES[s.role])}</option>`).join('')}</optgroup>`).join('');
-}
-
-// Remembers the last name picked on this device so repeat submitters don't have to search again.
-const LAST_SUBMITTER_KEY = 'setupqc.lastSubmitter';
-function rememberedSubmitter() {
-  try { return localStorage.getItem(LAST_SUBMITTER_KEY); } catch { return null; }
-}
-function rememberSubmitter(id) {
-  try { localStorage.setItem(LAST_SUBMITTER_KEY, id); } catch {}
-}
-
-async function renderQuickSubmit(view, projectId) {
-  const opts = await api('/api/public/options');
-  const project = opts.projects.find((p) => p.id === projectId);
-  if (!project) {
-    view.innerHTML = '<div class="empty"><h3>Unknown project</h3><a href="#/welcome">Back to start</a></div>';
-    return;
-  }
-  const saved = rememberedSubmitter();
-  const remembered = opts.submitters.some((s) => String(s.id) === saved) ? saved : '';
-
-  view.innerHTML = `
-    <a class="back" href="#/welcome">${icon.back} Start</a>
-    <div class="page-head"><div><h1>Submit a setup photo · ${esc(project.name)}</h1>
-      <p>Choose your name so QC knows who submitted, then upload the preview. Track QC feedback in the submission log.</p></div></div>
-    <div class="grid-2">
-      <form id="qForm" class="card" novalidate>
-        <div class="card-body stack">
-          <div>
-            <p class="section-title">Who is submitting?</p>
-            <div class="form-grid">
-              <label class="field"><span>Your name <em>*</em></span>
-                <select name="submitterId"><option value="">Select your name…</option>${submitterOptions(opts.submitters, remembered)}</select></label>
-              <label class="field"><span>Assigned SPL <em>*</em></span>
-                <select name="splId"><option value="">Select SPL…</option>
-                  ${opts.spls.map((s) => `<option value="${s.id}">${esc(s.name)} · ${esc(s.studio)}</option>`).join('')}</select></label>
-              <label class="field"><span>Task Name <em>*</em></span><input type="text" name="taskName" maxlength="200"></label>
-              <label class="field"><span>Scene <em>*</em></span><input type="text" name="scene" maxlength="200"></label>
-              <label class="field full"><span>Business Type <em>*</em></span><input type="text" name="businessType" maxlength="200"></label>
-            </div>
-          </div>
-          <div id="qFields"></div>
-        </div>
-        <div class="card-body" style="border-top:1px solid var(--border)">
-          <div class="actions" style="justify-content:flex-end"><button class="btn btn-primary btn-lg" type="submit">Submit for QC review</button></div>
-          <div class="progress" hidden><div></div></div>
-        </div>
-      </form>
-      <div class="card" id="qLog"><div class="spinner"></div></div>
-    </div>`;
-
-  const form = $('#qForm');
-  const syncSpl = () => {
-    const who = opts.submitters.find((s) => String(s.id) === form.submitterId.value);
-    const spl = who && opts.spls.find((s) => s.studio === who.studio);
-    if (spl) form.splId.value = spl.id;
-  };
-  form.submitterId.onchange = syncSpl;
-  syncSpl();
-  const fields = mountSubmissionFields($('#qFields'), project);
-
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    const errors = [];
-    if (!form.submitterId.value) errors.push('Choose your name so QC knows who submitted');
-    if (!form.splId.value) errors.push('Select the assigned SPL');
-    for (const [name, label] of [['taskName', 'Task Name'], ['scene', 'Scene'], ['businessType', 'Business Type']]) {
-      if (!form[name].value.trim()) errors.push(`${label} is required`);
-    }
-    errors.push(...fields.validate());
-    if (errors.length) return toast(errors[0], 'error');
-
-    const values = Object.fromEntries(['submitterId', 'splId', 'taskName', 'scene', 'businessType'].map((n) => [n, form[n].value.trim()]));
-    values.project = project.id;
-    const result = await submitWithProgress($('button[type=submit]', form), $('.progress', form), '/api/public/submissions', values, fields, 'Submit for QC review');
-    if (result) {
-      rememberSubmitter(form.submitterId.value);
-      toast('Submitted — QC has been notified');
-      location.hash = `#/s/${result.id}`;
-    }
-  };
-
-  renderSubmissionLog($('#qLog'), project);
-}
-
-async function renderSubmissionLog(el, project) {
-  const rows = await api(`/api/public/submissions?project=${encodeURIComponent(project.id)}`);
-  const tabs = [
-    { id: 'all', label: 'All', match: () => true },
-    { id: 'returned', label: 'Returned', match: (t) => t.status === 'returned' },
-    { id: 'open', label: 'In QC', match: (t) => t.status === 'pending' || t.status === 'reviewing' },
-    { id: 'approved', label: 'Approved', match: (t) => t.status === 'approved' },
-  ];
-  let tab = 'all';
-  let q = '';
-  el.innerHTML = `
-    <div class="card-head"><h2>Submission log</h2><span class="muted small">Who submitted · QC feedback</span></div>
-    <div class="toolbar"><div class="tabs"></div><input type="search" class="search" placeholder="Search name, task, code…"></div>
-    <div class="log"></div>`;
-  const draw = () => {
-    $('.tabs', el).innerHTML = tabs.map((t) => `<button class="${t.id === tab ? 'on' : ''}" data-tab="${t.id}">${t.label} <span class="n">${rows.filter(t.match).length}</span></button>`).join('');
-    const needle = q.toLowerCase();
-    const list = rows
-      .filter(tabs.find((t) => t.id === tab).match)
-      .filter((t) => !needle || [t.code, t.sd_name, t.task_name, t.scene, t.studio].some((v) => String(v || '').toLowerCase().includes(needle)));
-    $('.log', el).innerHTML = list.length ? list.map((t) => `
-      <a class="log-item" href="#/s/${t.id}">
-        <div class="log-top"><b>${esc(t.code)}</b>${pill(t)}<span class="faint small" style="margin-left:auto" title="${esc(fullTime(t.updated_at))}">${timeAgo(t.updated_at)}</span></div>
-        <div class="small">Submitted by <b>${esc(t.sd_name)}</b> · ${esc(t.studio)}${t.submission_no > 1 ? ` · Round ${t.submission_no}` : ''}</div>
-        <div class="muted small">${esc(t.task_name)} · ${esc(t.scene)}</div>
-        ${t.status === 'returned' && t.last_return ? `<div class="log-feedback"><b>Why it was returned</b> <span class="muted">· ${esc(t.last_return.user_name || 'QC')}</span><div>${esc(t.last_return.comment)}</div></div>` : ''}
-        ${t.status === 'approved' ? `<div class="small log-ok">${icon.check} Approved by ${esc(t.reviewer_name || 'QC')}: filming can begin</div>` : ''}
-      </a>`).join('') : `<div class="empty"><h3>Nothing here yet</h3><p>${rows.length ? 'Try another tab or search.' : 'Submissions for this project will appear here.'}</p></div>`;
-  };
-  draw();
-  $('.tabs', el).onclick = (e) => {
-    const b = e.target.closest('button');
-    if (b) { tab = b.dataset.tab; draw(); }
-  };
-  $('.search', el).oninput = (e) => { q = e.target.value; draw(); };
-}
-
-async function renderPublicTicket(view, id) {
-  const [{ ticket: t, project, history }, opts] = await Promise.all([api(`/api/public/submissions/${id}`), api('/api/public/options')]);
-  const lastReturn = history.find((h) => h.action === 'returned');
-  const canResubmit = t.status === 'returned';
-  const studioPeople = opts.submitters.filter((s) => s.studio === t.studio);
-  const saved = rememberedSubmitter();
-  const remembered = studioPeople.some((s) => String(s.id) === saved) ? saved : '';
-
-  view.innerHTML = `
-    <a class="back" href="#/submit/${esc(t.project)}">${icon.back} ${esc(project.name)} submission log</a>
-    <div class="page-head">
-      <div>
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><h1>${esc(t.code)}</h1>${pill(t)}</div>
-        <p>Submitted by <b>${esc(t.sd_name)}</b> · ${esc(t.studio)} · ${esc(t.task_name)} · ${esc(t.scene)}</p>
-      </div>
-      ${state.me ? `<a class="btn" href="#/t/${t.id}">Open full ticket</a>` : ''}
-    </div>
-    <div class="grid-2">
-      <div class="stack">
-        ${statusBanner(t, lastReturn)}
-        ${canResubmit ? `<div class="card" id="resubmitCard">
-          <div class="card-head"><h2>Fix and resubmit</h2></div>
-          <div class="card-body stack">
-            <p class="muted" style="margin:0">Fix the setup per the QC feedback above, re-confirm the checklist and upload a new preview.</p>
-            <label class="field" style="max-width:360px"><span>Who is resubmitting? <em>*</em></span>
-              <select id="resubWho"><option value="">Select your name…</option>${submitterOptions(studioPeople, remembered)}</select></label>
-            <div id="resubFields"></div>
-            <label class="field"><span>Note to QC (optional)</span><textarea id="resubNote" style="min-height:80px" placeholder="What did you change?"></textarea></label>
-            <div class="actions" style="justify-content:flex-end"><button class="btn btn-primary btn-lg" id="resubmitBtn">Resubmit for QC review</button></div>
-            <div class="progress" hidden><div></div></div>
-          </div></div>` : ''}
-        <div class="card">
-          <div class="card-head"><h2>History</h2><span class="muted small">Every submission and QC decision</span></div>
-          <div class="card-body">${historyHtml(history)}</div>
-        </div>
-      </div>
-      <div class="stack">
-        ${qcResults(t, project)}
-        <div class="card">
-          <div class="card-head"><h2>Details</h2></div>
-          <div class="card-body"><dl class="dl">
-            <dt>Submitted by</dt><dd>${esc(t.sd_name)}</dd>
-            <dt>Studio</dt><dd>${esc(t.studio || '—')}</dd>
-            <dt>Assigned SPL</dt><dd>${esc(t.spl_name || '—')}</dd>
-            <dt>Project</dt><dd>${esc(t.project_name)}</dd>
-            <dt>Task Name</dt><dd>${esc(t.task_name)}</dd>
-            <dt>Scene</dt><dd>${esc(t.scene)}</dd>
-            <dt>Business Type</dt><dd>${esc(t.business_type)}</dd>
-            ${t.boundary_size ? `<dt>Boundary box</dt><dd>${t.boundary_size}m × ${t.boundary_size}m</dd>` : ""}
-            ${t.country ? `<dt>Location</dt><dd>${esc(t.country)}${t.region ? ` · ${esc(t.region)}` : ""}</dd>` : ""}
-            <dt>QC reviewer</dt><dd>${esc(t.reviewer_name || '—')}</dd>
-            <dt>Submitted</dt><dd>${fullTime(t.created_at)}</dd>
-          </dl></div>
-        </div>
-        <div class="card"><div class="card-body">${guidelinesHtml(project, { open: canResubmit })}</div></div>
-      </div>
-    </div>`;
-
-  if (!canResubmit) return;
-  const fields = mountSubmissionFields($('#resubFields'), project, { boundarySize: t.boundary_size });
-  $('#resubmitBtn').onclick = async () => {
-    const who = $('#resubWho').value;
-    const errors = [...(who ? [] : ['Choose who is resubmitting']), ...fields.validate()];
-    if (errors.length) return toast(errors[0], 'error');
-    const ok = await submitWithProgress($('#resubmitBtn'), $('.progress', $('#resubmitCard')), `/api/public/submissions/${t.id}/resubmit`,
-      { submitterId: who, note: $('#resubNote').value }, fields, 'Resubmit for QC review');
-    if (ok) {
-      rememberSubmitter(who);
-      toast('Resubmitted — QC has been notified');
-      route();
-    }
-  };
 }
 
 // ---------- Team (add users) ----------

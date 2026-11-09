@@ -159,9 +159,16 @@ async function route() {
   if (!state.me) {
     try { state.me = await api('/api/me'); } catch {}
   }
-  // Pages reachable without logging in: the start page, login, and "Submit a photo".
-  const isPublic = [/^\/welcome$/, /^\/login$/, /^\/submit\/\w+$/, /^\/s\/\d+$/].some((r) => r.test(hash));
-  if (!state.me && !isPublic) return void (location.hash = '#/welcome');
+  // "Submit a photo" (start page) and old ticket links: sign in first, then continue there.
+  let m;
+  if ((m = hash.match(/^\/submit\/([\w-]+)$/))) return void goAfterSignIn(`/new/${m[1]}`);
+  if ((m = hash.match(/^\/s\/(\d+)$/))) return void goAfterSignIn(`/t/${m[1]}`);
+  // Pages reachable without logging in: the start page and login.
+  const isPublic = hash === '/welcome' || hash === '/login';
+  if (!state.me && !isPublic) {
+    if (hash !== '/') rememberNext(hash);
+    return void (location.hash = '#/welcome');
+  }
   if (state.me && (hash === '/welcome' || hash === '/login')) return void (location.hash = '#/');
   if (state.me && !state.meta) state.meta = await api('/api/meta');
 
@@ -169,14 +176,15 @@ async function route() {
   const view = $('#view');
   view.innerHTML = '<div class="spinner"></div>';
   window.scrollTo(0, 0);
-  let m;
   try {
     if (hash === '/welcome') return await renderWelcome(view);
     if (hash === '/login') return await renderLogin(view);
-    if ((m = hash.match(/^\/submit\/(\w+)$/))) return await renderQuickSubmit(view, m[1]);
-    if ((m = hash.match(/^\/s\/(\d+)$/))) return await renderPublicTicket(view, Number(m[1]));
     if (hash === '/') return await renderHome(view);
-    if (hash === '/new' && state.me.role === 'SD') return renderNewTicket(view);
+    if ((m = hash.match(/^\/new(?:\/([\w-]+))?$/))) {
+      if (state.me.role === 'SD') return renderNewTicket(view, m[1]);
+      toast('Only Set Directors submit setup entries. Sign in with a Set Director account to submit.', 'error');
+      return void (location.hash = '#/');
+    }
     if (hash === '/team' && ['ADMIN', 'SPL'].includes(state.me.role)) return await renderTeam(view);
     if (hash === '/projects' && state.me.role === 'ADMIN') return await renderProjects(view);
     if ((m = hash.match(/^\/projects\/([\w-]+)$/)) && state.me.role === 'ADMIN') return await renderProjectEditor(view, m[1]);
@@ -208,7 +216,7 @@ function renderHeader(hash) {
     <a class="brand" href="#/">${brandHtml()}</a>
     <nav class="nav">
       <a href="#/" class="${hash === '/' ? 'active' : ''}">${homeLabel}</a>
-      ${me.role === 'SD' ? `<a href="#/new" class="${hash === '/new' ? 'active' : ''}">New ticket</a>` : ''}
+      ${me.role === 'SD' ? `<a href="#/new" class="${hash.startsWith('/new') ? 'active' : ''}">New ticket</a>` : ''}
       ${['ADMIN', 'SPL'].includes(me.role) ? `<a href="#/team" class="${hash === '/team' ? 'active' : ''}">Team</a>` : ''}
       ${me.role === 'ADMIN' ? `<a href="#/projects" class="${hash.startsWith('/projects') ? 'active' : ''}">Projects</a>` : ''}
     </nav>
@@ -289,20 +297,42 @@ function loadGoogleIdentity() {
   return gisPromise;
 }
 
+// Where to go after signing in (e.g. the submission form chosen on the start page).
+const NEXT_KEY = 'setupqc.next';
+function rememberNext(path) {
+  try { sessionStorage.setItem(NEXT_KEY, path); } catch {}
+}
+function takeNext() {
+  try {
+    const next = sessionStorage.getItem(NEXT_KEY);
+    sessionStorage.removeItem(NEXT_KEY);
+    return next;
+  } catch {
+    return null;
+  }
+}
+function goAfterSignIn(path) {
+  if (state.me) return void (location.hash = `#${path}`);
+  rememberNext(path);
+  location.hash = '#/login';
+}
+
 const signedIn = (user) => {
   state.me = user;
   state.meta = null;
-  location.hash = '#/';
+  location.hash = `#${takeNext() || '/'}`;
 };
 
 async function renderLogin(view) {
+  let submitting = false;
+  try { submitting = (sessionStorage.getItem(NEXT_KEY) || '').startsWith('/new'); } catch {}
   const { googleClientId, devLogin } = state.auth;
   view.innerHTML = `
     <div class="login">
       <div class="login-hero">
         ${heroLogoHtml()}
-        <h1>Log in</h1>
-        <p>Pre-recording setup approvals for the Studio QA/Capture team. <a href="#/welcome">← Back</a></p>
+        <h1>${submitting ? 'Sign in to submit' : 'Log in'}</h1>
+        <p>${submitting ? 'Set Directors sign in with their email before submitting a setup entry.' : 'Pre-recording setup approvals for the Studio QA/Capture team.'} <a href="#/welcome">← Back</a></p>
       </div>
       <div class="card"><div class="card-body" id="emailSignIn"></div></div>
       ${googleClientId ? `<div class="card" style="margin-top:16px"><div class="card-body google-signin">
@@ -779,8 +809,10 @@ async function submitWithProgress(btn, progressEl, url, fields, sub, label) {
 
 // ---------- New ticket ----------
 
-function renderNewTicket(view) {
+// `projectId` preselects the project (e.g. chosen on the start page before signing in).
+function renderNewTicket(view, projectId) {
   const { me, meta } = state;
+  const chosen = meta.projects.find((p) => p.id === projectId)?.id;
   const defaultSpl = meta.spls.find((s) => s.studio === me.studio);
   view.innerHTML = `
     <a class="back" href="#/">${icon.back} My tickets</a>
@@ -800,7 +832,7 @@ function renderNewTicket(view) {
             <label class="field"><span>Scene <em>*</em></span><input type="text" name="scene" required maxlength="200"></label>
             <label class="field"><span>Business Type <em>*</em></span><input type="text" name="businessType" required maxlength="200"></label>
             <label class="field"><span>Project <em>*</em></span>
-              <select name="project">${meta.projects.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>
+              <select name="project">${meta.projects.map((p) => `<option value="${p.id}" ${p.id === chosen ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
           </div>
         </div>
         <div id="subFields"></div>

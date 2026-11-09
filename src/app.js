@@ -330,9 +330,9 @@ async function insertMedia(c, ticketId, submissionNo, media) {
 // 1. POST /api/uploads {name, mime, size, duration} → { uploadId, chunkSize }
 // 2. PUT  /api/uploads/:id/:n  (raw bytes, in order)
 // 3. POST /api/uploads/:id/complete
-// Open to "Submit a photo" (no login); behind SITE_PASSWORD when that is set.
+// Signed-in Set Directors only (they upload media for their own submissions and resubmissions).
 
-app.post('/api/uploads', async (req, res) => {
+app.post('/api/uploads', requireAuth, requireRole('SD'), async (req, res) => {
   const b = req.body || {};
   const mime = String(b.mime || '');
   const size = Number(b.size);
@@ -347,7 +347,7 @@ app.post('/api/uploads', async (req, res) => {
   res.status(201).json({ uploadId: id, chunkSize: storage.CHUNK_SIZE, chunks });
 });
 
-app.put('/api/uploads/:id/:n', unlessParsed(express.raw({ type: () => true, limit: storage.CHUNK_SIZE + 1024 })), async (req, res) => {
+app.put('/api/uploads/:id/:n', requireAuth, requireRole('SD'), unlessParsed(express.raw({ type: () => true, limit: storage.CHUNK_SIZE + 1024 })), async (req, res) => {
   const u = await one("SELECT * FROM uploads WHERE id = $1 AND status = 'open'", [req.params.id]);
   if (!u) throw new HttpError(404, 'Upload not found');
   const n = Number(req.params.n);
@@ -361,7 +361,7 @@ app.put('/api/uploads/:id/:n', unlessParsed(express.raw({ type: () => true, limi
   res.json({ ok: true });
 });
 
-app.post('/api/uploads/:id/complete', async (req, res) => {
+app.post('/api/uploads/:id/complete', requireAuth, requireRole('SD'), async (req, res) => {
   const u = await one("SELECT * FROM uploads WHERE id = $1 AND status = 'open'", [req.params.id]);
   if (!u) throw new HttpError(404, 'Upload not found');
   if (u.received !== u.chunks) throw new HttpError(409, `Upload incomplete: ${u.received} of ${u.chunks} parts received`);
@@ -795,51 +795,20 @@ app.post('/api/tickets/:id/resubmit', requireAuth, requireRole('SD'), async (req
   res.json({ ok: true });
 });
 
-// ---------- "Submit a photo" (no login) ----------
-// The submitter picks their own name; every submission and resubmission records who it was,
-// and the submission log shows QC's feedback on returned tickets. Media is not exposed here.
-
-const SUBMITTER_SQL = "SELECT * FROM users WHERE id = $1 AND active = 1 AND role IN ('SD', 'SPC', 'SPL') AND studio IS NOT NULL";
+// ---------- Public info for the start and sign-in pages ----------
+// Submitting requires signing in as a Set Director; this only lists projects (start page) and
+// studios (the "request access" form). No names or tickets are exposed.
 
 app.get('/api/public/options', async (req, res) => {
   res.json({
-    projects: listProjects(),
-    submitters: await q("SELECT id, name, role, studio FROM users WHERE active = 1 AND role IN ('SD', 'SPC', 'SPL') AND studio IS NOT NULL ORDER BY studio, name"),
-    spls: await q("SELECT id, name, studio FROM users WHERE role = 'SPL' AND active = 1 ORDER BY studio"),
+    projects: listProjects().map(({ id, name }) => ({ id, name })),
+    studios: (await q('SELECT name FROM studios WHERE active = 1 ORDER BY name')).map((r) => r.name),
   });
 });
 
-app.get('/api/public/submissions', async (req, res) => {
-  const project = getProject(req.query.project);
-  if (!project) throw new HttpError(400, 'Unknown project');
-  const rows = await q(`${TICKET_SELECT} WHERE t.project = $1 ORDER BY t.updated_at DESC LIMIT 100`, [project.id]);
-  const returns = await q(`SELECT DISTINCT ON (h.ticket_id) h.ticket_id, h.comment, h.created_at, u.name AS user_name
-    FROM history h LEFT JOIN users u ON u.id = h.user_id
-    WHERE h.action = 'returned' AND h.ticket_id = ANY($1) ORDER BY h.ticket_id, h.id DESC`, [rows.map((t) => t.id)]);
-  const lastReturn = Object.fromEntries(returns.map((r) => [r.ticket_id, { comment: r.comment, created_at: r.created_at, user_name: r.user_name }]));
-  res.json(rows.map((t) => ({ ...shapeTicket(t), last_return: lastReturn[t.id] || null })));
-});
-
-app.get('/api/public/submissions/:id', async (req, res) => {
-  const t = await one(`${TICKET_SELECT} WHERE t.id = $1`, [Number(req.params.id) || 0]);
-  if (!t) throw new HttpError(404, 'Submission not found');
-  res.json({ ticket: shapeTicket(t), project: getProject(t.project), history: await historyFor(t.id) });
-});
-
-app.post('/api/public/submissions', async (req, res) => {
-  const submitter = await one(SUBMITTER_SQL, [Number(req.body?.submitterId) || 0]);
-  if (!submitter) throw new HttpError(400, 'Choose who is submitting');
-  res.status(201).json({ id: await createTicket(submitter, req.body, 'quick') });
-});
-
-app.post('/api/public/submissions/:id/resubmit', async (req, res) => {
-  const t = await one(`${TICKET_SELECT} WHERE t.id = $1`, [Number(req.params.id) || 0]);
-  if (!t) throw new HttpError(404, 'Submission not found');
-  const submitter = await one(SUBMITTER_SQL, [Number(req.body?.submitterId) || 0]);
-  if (!submitter) throw new HttpError(400, 'Choose who is resubmitting');
-  if (submitter.studio !== t.studio) throw new HttpError(403, `Only ${t.studio} team members can resubmit this ticket`);
-  await resubmitTicket(t, submitter, req.body, 'quick');
-  res.json({ ok: true });
+// The old no-login "Submit a photo" endpoints answer with a clear message.
+app.all(['/api/public/submissions', '/api/public/submissions/:id', '/api/public/submissions/:id/resubmit'], () => {
+  throw new HttpError(401, 'Sign in as a Set Director to submit or view entries');
 });
 
 // ---------- Team management ----------
