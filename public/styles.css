@@ -474,3 +474,11 @@ label.btn { cursor: pointer; }
 .view-as select { width: auto; min-width: 220px; height: 36px; }
 .preview-banner { margin-bottom: 16px; align-items: center; }
 .preview-banner > div { flex: 1; }
+
+/* Dashboard filter bar (country / city / project / reviewer / submitted date), above the numbers it filters */
+.dash-filters { margin-bottom: 16px; overflow: hidden; }
+.dash-filters .filters { border-bottom: 0; background: transparent; }
+.date-custom { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.date-custom[hidden] { display: none; }
+.date-custom input[type="date"] { width: auto; height: 34px; }
+@media (max-width: 720px) { .date-custom { flex: 1 1 100%; } .date-custom input[type="date"] { flex: 1 1 120px; } }

@@ -1065,8 +1065,19 @@ app.post('/api/admin/drive/run', requireAuth, requireRole('ADMIN'), async (req, 
 app.get('/api/stats', requireAuth, requireRole('SPL', 'SPC', 'QC', 'ADMIN'), async (req, res) => {
   const viewer = await viewerFor(req);
   const params = [];
+  // Optional dashboard filters: country, region, project, and the submitted-date range [from, to)
+  // as ISO timestamps (the browser turns its local day boundaries into these).
+  const where = [visibility(viewer, params)];
+  const add = (sql, value) => { params.push(value); where.push(sql.replace('?', `$${params.length}`)); };
+  const { country, region, project, from, to } = req.query;
+  if (country) add("COALESCE(st.country, 'Unassigned') = ?", String(country));
+  if (region) add('st.region = ?', String(region));
+  if (project) add('t.project = ?', String(project));
+  const iso = (v) => (v && !Number.isNaN(Date.parse(v)) ? new Date(v).toISOString() : null);
+  if (iso(from)) add('t.created_at >= ?', iso(from));
+  if (iso(to)) add('t.created_at < ?', iso(to));
   const tickets = await q(`SELECT t.id, t.status, t.studio, t.submission_no, st.country, st.region
-    FROM tickets t LEFT JOIN studios st ON st.name = t.studio WHERE ${visibility(viewer, params)}`, params);
+    FROM tickets t LEFT JOIN studios st ON st.name = t.studio WHERE ${where.map((w) => `(${w})`).join(' AND ')}`, params);
   let history = await q(`SELECT ticket_id, action, user_id, created_at FROM history
     WHERE action IN ('submitted','resubmitted','approved','returned') AND ticket_id = ANY($1) ORDER BY id`, [tickets.map((t) => t.id)]);
   // A QC reviewer's numbers only count their own decisions.

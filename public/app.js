@@ -426,10 +426,11 @@ async function renderHome(view) {
   if (me.role === 'QC') {
     view.innerHTML = `
       <div class="page-head"><div><h1>Review queue</h1><p>Tickets waiting for review, plus the ones you've approved or returned. Your numbers count only your own reviews.</p></div></div>
+      <div class="card dash-filters" id="filters" hidden></div>
       <div id="stats"></div>
       <div class="card" id="list"></div>`;
-    renderStats($('#stats'));
-    return ticketList($('#list'), { defaultTab: 'open', columns: ['ticket', 'project', 'sd', 'location', 'status', 'round', 'updated'] });
+    return ticketList($('#list'), { defaultTab: 'open', columns: ['ticket', 'project', 'sd', 'location', 'status', 'round', 'submitted', 'updated'],
+      onScope: (f) => renderStats($('#stats'), { filters: f }), filtersHost: $('#filters') });
   }
   if (me.role === 'ADMIN') {
     // "View as": admins can preview exactly what a QC reviewer (or a studio lead) sees.
@@ -445,6 +446,7 @@ async function renderHome(view) {
           <button class="btn" id="exportZip" type="button">${icon.download} Export ZIP</button>
         </div></div>
       <div id="previewNote"></div>
+      <div class="card dash-filters" id="filters" hidden></div>
       <div id="stats"></div>
       <div class="card" id="list"></div>`;
     let visible = [];
@@ -459,11 +461,12 @@ async function renderHome(view) {
         <button class="btn small" type="button" data-exit>Back to admin view</button></div>` : '';
       $('#previewNote [data-exit]')?.addEventListener('click', () => { $('#viewAs').value = ''; load(''); });
       $('#exportZip').hidden = Boolean(person);
-      renderStats($('#stats'), { byLocation: !person, query });
       ticketList($('#list'), {
+        onScope: (f) => renderStats($('#stats'), { byLocation: !person, query, filters: f }),
+        filtersHost: $('#filters'),
         defaultTab: person?.role === 'QC' ? 'open' : 'all',
         query,
-        columns: ['ticket', 'project', 'sd', 'location', 'status', 'round', 'reviewer', 'updated'],
+        columns: ['ticket', 'project', 'sd', 'location', 'status', 'round', 'reviewer', 'submitted', 'updated'],
         onFilter: (rows, f) => { visible = rows; currentFilters = f; },
       });
     };
@@ -472,17 +475,25 @@ async function renderHome(view) {
   }
   view.innerHTML = `
     <div class="page-head"><div><h1>${esc(me.studio)} overview</h1><p>Setup submissions, QC outcomes and tickets that need corrections.</p></div></div>
+    <div class="card dash-filters" id="filters" hidden></div>
     <div id="stats"></div>
     <div class="card" id="list"></div>`;
-  renderStats($('#stats'));
-  return ticketList($('#list'), { defaultTab: 'returned', columns: ['ticket', 'sd', 'status', 'round', 'reviewer', 'updated'] });
+  return ticketList($('#list'), { defaultTab: 'returned', columns: ['ticket', 'sd', 'status', 'round', 'reviewer', 'submitted', 'updated'],
+    onScope: (f) => renderStats($('#stats'), { filters: f }), filtersHost: $('#filters') });
 }
 
-async function renderStats(el, { byLocation = false, query = '' } = {}) {
-  const s = await api(`/api/stats${query}`);
+// `filters` (country, region, project, from, to) come from the ticket list below, so the numbers match it.
+async function renderStats(el, { byLocation = false, query = '', filters = {} } = {}) {
+  const params = new URLSearchParams(query.replace(/^\?/, ''));
+  for (const k of ['country', 'region', 'project', 'from', 'to']) if (filters[k]) params.set(k, filters[k]);
+  const token = (el.dataset.req = String(Math.random())); // ignore answers to older requests
+  const qs = params.toString();
+  const s = await api(`/api/stats${qs ? `?${qs}` : ''}`);
+  if (el.dataset.req !== token) return;
+  const scope = [filters.country, filters.region, filters.dateLabel].filter(Boolean).join(' · ') || 'All tickets';
   const locationTable = byLocation && s.byLocation?.length ? `
     <div class="card by-location">
-      <div class="card-head"><h2>By country and city</h2><span class="muted small">All tickets</span></div>
+      <div class="card-head"><h2>By country and city</h2><span class="muted small">${esc(scope)}</span></div>
       <div class="table-scroll"><table class="tickets"><thead><tr><th>Country</th><th>City / region</th><th>Pending</th><th>In review</th><th>Needs fixes</th><th>Approved</th><th>Total</th></tr></thead>
       <tbody>${s.byLocation.map((l) => `<tr class="static"><td><b>${esc(l.country)}</b></td><td>${esc(l.region)}</td><td>${l.pending}</td><td>${l.reviewing}</td><td>${l.returned}</td><td>${l.approved}</td><td><b>${l.total}</b></td></tr>`).join('')}</tbody></table></div>
     </div>` : '';
@@ -497,12 +508,25 @@ async function renderStats(el, { byLocation = false, query = '' } = {}) {
     <div class="card stat"><div class="k">Approved</div><div class="v">${s.counts.approved}</div></div>
     <div class="card stat"><div class="k">First-pass approval</div><div class="v">${pct}</div></div>
     <div class="card stat"><div class="k">Avg. QC turnaround</div><div class="v">${avg}</div></div>
-  </div>${locationTable}`;
+  </div>${byLocation && !s.byLocation?.length ? `<div class="card by-location"><div class="card-head"><h2>By country and city</h2><span class="muted small">${esc(scope)}</span></div><div class="empty"><p>No tickets match these filters.</p></div></div>` : locationTable}`;
 }
+
+// Submitted-date presets for the dashboard filter; bounds are local days, as ISO timestamps [from, to).
+const DATE_RANGES = [['any', 'Any date'], ['today', 'Today'], ['yesterday', 'Yesterday'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days'],
+  ['month', 'This month'], ['lastmonth', 'Last month'], ['custom', 'Custom dates…']];
+function dateBounds(range) {
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0);
+  const day = (n) => new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() + n);
+  const month = (k) => new Date(d0.getFullYear(), d0.getMonth() + k, 1);
+  const r = { today: [day(0), day(1)], yesterday: [day(-1), day(0)], '7d': [day(-6), day(1)], '30d': [day(-29), day(1)],
+    month: [month(0), month(1)], lastmonth: [month(-1), month(0)] }[range];
+  return r ? { from: r[0].toISOString(), to: r[1].toISOString() } : { from: '', to: '' };
+}
+const shortDate = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—');
 
 // Ticket list with status tabs, search and (for everyone but SDs) Country / City / Project filters.
 // `onFilter(rows, filters)` is told whenever the visible rows change (used by Export ZIP).
-async function ticketList(el, { defaultTab, columns, onFilter, query = '' }) {
+async function ticketList(el, { defaultTab, columns, onFilter, onScope, filtersHost, query = '' }) {
   const tickets = await api(`/api/tickets${query}`);
   const tabs = [
     { id: 'all', label: 'All', match: () => true },
@@ -512,7 +536,8 @@ async function ticketList(el, { defaultTab, columns, onFilter, query = '' }) {
   ];
   let tab = defaultTab;
   let q = '';
-  const filters = { country: '', region: '', project: '', reviewer: '' };
+  const filters = { country: '', region: '', project: '', reviewer: '', from: '', to: '' };
+  let dateRange = 'any';
   // QC reviewer filter (admins): who checked each ticket.
   const reviewers = [...new Set(tickets.map((t) => t.reviewer_name).filter(Boolean))].sort();
   const showReviewer = state.me.role === 'ADMIN' && !query;
@@ -527,6 +552,7 @@ async function ticketList(el, { defaultTab, columns, onFilter, query = '' }) {
     status: ['Status', (t) => pill(t)],
     round: ['Round', (t) => `<span class="muted">#${t.submission_no}</span>`, 'hide-sm'],
     reviewer: ['QC', (t) => (t.reviewer_name ? esc(t.reviewer_name) : '<span class="faint">—</span>'), 'hide-sm'],
+    submitted: ['Submitted', (t) => `<span class="muted" title="${esc(fullTime(t.created_at))}">${shortDate(t.created_at)}</span>`, 'hide-sm'],
     updated: ['Updated', (t) => `<span class="muted" title="${esc(fullTime(t.updated_at))}">${timeAgo(t.updated_at)}</span>`],
   };
 
@@ -550,11 +576,17 @@ async function ticketList(el, { defaultTab, columns, onFilter, query = '' }) {
       <select data-f="region" aria-label="City or region">${regionOptions()}</select>
       ${projects.length > 1 ? `<select data-f="project" aria-label="Project"><option value="">All projects</option>${projects.map(([id, name]) => option(id, name, '')).join('')}</select>` : ''}
       ${showReviewer ? `<select data-f="reviewer" aria-label="QC reviewer"><option value="">All QC reviewers</option><option value="__none">Not reviewed yet</option>${reviewers.map((r) => option(r, r, '')).join('')}</select>` : ''}
+      <select data-f="date" aria-label="Submitted date">${DATE_RANGES.map(([id, label]) => option(id, label, 'any')).join('')}</select>
+      <span class="date-custom" hidden><input type="date" data-d="from" aria-label="From date"><span class="muted small">to</span><input type="date" data-d="to" aria-label="To date"></span>
       <span class="filter-count muted small"></span>
     </div>` : ''}
     <div class="list-body"></div>`;
+  // The filter bar can live elsewhere on the page (dashboards put it above the numbers it also filters).
+  const fx = $('.filters', el) || el;
+  if (filtersHost && fx !== el) { filtersHost.replaceChildren(fx); filtersHost.hidden = false; }
   const inFilters = (t) => (!filters.country || t.country === filters.country) && (!filters.region || t.region === filters.region) && (!filters.project || t.project === filters.project)
-    && (!filters.reviewer || (filters.reviewer === '__none' ? !t.reviewer_name : t.reviewer_name === filters.reviewer));
+    && (!filters.reviewer || (filters.reviewer === '__none' ? !t.reviewer_name : t.reviewer_name === filters.reviewer))
+    && (!filters.from || t.created_at >= filters.from) && (!filters.to || t.created_at < filters.to);
   const draw = () => {
     const scoped = tickets.filter(inFilters);
     $('.tabs', el).innerHTML = tabs.map((t) => `<button class="${t.id === tab ? 'on' : ''}" data-tab="${t.id}">${t.label} <span class="n">${scoped.filter(t.match).length}</span></button>`).join('');
@@ -564,27 +596,52 @@ async function ticketList(el, { defaultTab, columns, onFilter, query = '' }) {
       .filter((t) => !needle || [t.code, t.task_name, t.scene, t.business_type, t.sd_name, t.studio, t.country, t.region].some((v) => String(v || '').toLowerCase().includes(needle)));
     if (tab === 'open') rows.sort((a, b) => a.updated_at.localeCompare(b.updated_at)); // oldest first: FIFO queue
     const active = Object.values(filters).some(Boolean);
-    if ($('.filter-count', el)) $('.filter-count', el).textContent = active ? `${scoped.length} of ${tickets.length} tickets match` : '';
+    if ($('.filter-count', fx)) $('.filter-count', fx).textContent = active ? `${scoped.length} of ${tickets.length} tickets match` : '';
     $('.list-body', el).innerHTML = rows.length
       ? `<table class="tickets"><thead><tr>${columns.map((c) => `<th class="${cols[c][2] || ''}">${cols[c][0]}</th>`).join('')}</tr></thead>
          <tbody>${rows.map((t) => `<tr data-id="${t.id}">${columns.map((c) => `<td class="${cols[c][2] || ''}">${cols[c][1](t)}</td>`).join('')}</tr>`).join('')}</tbody></table>`
       : `<div class="empty"><h3>No tickets here</h3><p>${tickets.length ? 'Try a different tab, filter or search.' : state.me.role === 'SD' ? 'Create your first setup ticket before filming.' : 'Nothing has been submitted yet.'}</p></div>`;
     onFilter?.(rows, { ...filters, tab, q });
   };
+  let lastScope = null;
+  const scopeChanged = () => {
+    const custom = [$('[data-d="from"]', fx)?.value, $('[data-d="to"]', fx)?.value].filter(Boolean).join(' – ');
+    const f = { country: filters.country, region: filters.region, project: filters.project, from: filters.from, to: filters.to,
+      dateLabel: dateRange === 'any' ? '' : dateRange === 'custom' ? custom : DATE_RANGES.find(([id]) => id === dateRange)[1] };
+    const key = JSON.stringify(f);
+    if (key !== lastScope) { lastScope = key; onScope?.(f); }
+  };
   draw();
+  scopeChanged();
   $('.tabs', el).onclick = (e) => {
     const b = e.target.closest('button');
     if (b) { tab = b.dataset.tab; draw(); }
   };
-  $('.filters', el)?.addEventListener('change', (e) => {
+  fx.addEventListener('change', (e) => {
+    if (e.target.dataset.d) { // custom dates: whole local days, "to" inclusive
+      const from = $('[data-d="from"]', fx).value, to = $('[data-d="to"]', fx).value;
+      filters.from = from ? new Date(`${from}T00:00`).toISOString() : '';
+      filters.to = to ? new Date(new Date(`${to}T00:00`).getTime() + 86400000).toISOString() : '';
+      draw(); scopeChanged();
+      return;
+    }
     const f = e.target.dataset.f;
     if (!f) return;
+    if (f === 'date') {
+      dateRange = e.target.value;
+      $('.date-custom', fx).hidden = dateRange !== 'custom';
+      if (dateRange === 'custom') { $('[data-d="from"]', fx).value = ''; $('[data-d="to"]', fx).value = ''; }
+      Object.assign(filters, dateBounds(dateRange));
+      draw(); scopeChanged();
+      return;
+    }
     filters[f] = e.target.value;
     if (f === 'country') {
       filters.region = '';
-      $('[data-f="region"]', el).innerHTML = regionOptions();
+      $('[data-f="region"]', fx).innerHTML = regionOptions();
     }
     draw();
+    scopeChanged();
   });
   $('.search', el).oninput = (e) => { q = e.target.value; draw(); };
   $('.list-body', el).onclick = (e) => {
