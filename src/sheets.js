@@ -60,6 +60,9 @@ function rowFor(t, lastReturn, status) {
     Link: status ? '' : appLink(`/t/${t.id}`),
   };
   for (const k of Object.keys(row)) row[k] = cell(row[k]);
+  // The entry's Google Drive folder (set once its first file is copied), as a clickable link.
+  row['Drive Folder'] = t.drive_folder_url && /^https:\/\/drive\.google\.com\//.test(t.drive_folder_url)
+    ? `=HYPERLINK("${t.drive_folder_url}", "Open folder")` : '';
   return row;
 }
 

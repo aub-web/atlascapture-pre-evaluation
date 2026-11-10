@@ -237,6 +237,7 @@ function renderHeader(hash) {
     await api('/api/session', { method: 'DELETE' });
     window.google?.accounts.id.disableAutoSelect();
     state.me = state.meta = null;
+    state.lastNotifId = null;
     location.hash = '#/welcome';
   };
   const panel = $('#notifPanel');
@@ -249,7 +250,14 @@ function renderHeader(hash) {
 
   loadNotifications(false);
   clearInterval(state.notifTimer);
-  state.notifTimer = setInterval(() => loadNotifications(!panel.hidden), 20000);
+  // Checks every 8 s while the tab is visible, and right away when you come back to it.
+  state.notifTimer = setInterval(() => { if (!document.hidden) loadNotifications(!panel.hidden); }, 8000);
+  if (!state.notifFocusHooked) {
+    state.notifFocusHooked = true;
+    const refresh = () => { if (!document.hidden && $('#bellBadge')) loadNotifications(!$('#notifPanel')?.hidden); };
+    document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('focus', refresh);
+  }
 }
 
 async function loadNotifications(renderPanel) {
@@ -259,6 +267,13 @@ async function loadNotifications(renderPanel) {
   if (!badge) return;
   badge.hidden = !data.unread;
   badge.textContent = data.unread > 99 ? '99+' : data.unread;
+  // Pop up anything new since the last check (not on the first load of the page).
+  const newest = data.items[0]?.id || 0;
+  if (state.lastNotifId != null && newest > state.lastNotifId) {
+    const fresh = data.items.filter((n) => n.id > state.lastNotifId && !n.read_at);
+    if (fresh.length) toast(fresh.length === 1 ? fresh[0].message : `${fresh.length} new notifications`);
+  }
+  state.lastNotifId = Math.max(state.lastNotifId || 0, newest);
   if (!renderPanel) return;
 
   const panel = $('#notifPanel');
@@ -478,7 +493,7 @@ async function renderHome(view) {
     <div class="card dash-filters" id="filters" hidden></div>
     <div id="stats"></div>
     <div class="card" id="list"></div>`;
-  return ticketList($('#list'), { defaultTab: 'returned', columns: ['ticket', 'sd', 'status', 'round', 'reviewer', 'submitted', 'updated'],
+  return ticketList($('#list'), { defaultTab: 'returned', columns: ['ticket', 'sd', 'status', 'round', 'submitted', 'updated'],
     onScope: (f) => renderStats($('#stats'), { filters: f }), filtersHost: $('#filters') });
 }
 

@@ -28,6 +28,18 @@ function fileNameFor({ country, project, business, code, label, mime, originalNa
   return `${[part(country || 'Unassigned'), part(project), part(business), part(code), part(label)].join('_')}.${ext}`;
 }
 
+// Drive layout: <root folder> / <Country> / "TKT-0001 - Country/Region - Submitter Name" / files.
+async function entryFolders(mediaId) {
+  const t = await one(`SELECT t.id, t.code, t.drive_folder_url, st.country, st.region, sd.name AS sd_name
+    FROM media m JOIN tickets t ON t.id = m.ticket_id JOIN users sd ON sd.id = t.sd_id LEFT JOIN studios st ON st.name = t.studio
+    WHERE m.id = $1`, [mediaId]);
+  if (!t) return { ticket: null, folders: [] };
+  const clean = (s) => String(s || '').replace(/[\r\n\t]+/g, ' ').trim();
+  const country = clean(t.country) || 'Unassigned';
+  const place = [country, clean(t.region)].filter(Boolean).join('/');
+  return { ticket: t, folders: [country, `${t.code} - ${place} - ${clean(t.sd_name)}`] };
+}
+
 // Queues Drive copies for a ticket's media (call after the media rows are inserted).
 async function queueTicketMedia(ticketId, submissionNo) {
   if (!driveEnabled()) return 0;
@@ -48,11 +60,11 @@ async function queueTicketMedia(ticketId, submissionNo) {
   return rows.length;
 }
 
-async function openSession(job) {
+async function openSession(job, folders) {
   const res = await fetch(process.env.SHEETS_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({ secret: process.env.SHEETS_WEBHOOK_SECRET, action: 'drive-session', name: job.file_name, mime: job.mime, size: job.size }),
+    body: JSON.stringify({ secret: process.env.SHEETS_WEBHOOK_SECRET, action: 'drive-session', name: job.file_name, mime: job.mime, size: job.size, folders }),
     redirect: 'follow',
     signal: AbortSignal.timeout(20_000),
   });
@@ -60,14 +72,21 @@ async function openSession(job) {
   let data = null;
   try { data = JSON.parse(text); } catch {}
   if (!data?.ok || !data.uploadUrl) throw new Error(data?.error || `Apps Script answered HTTP ${res.status}: ${text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 160)}`);
-  return data.uploadUrl;
+  return data;
 }
 
 // Sends the next pieces of one job until it finishes or the deadline passes. Returns the new status.
 async function advanceJob(job, deadline) {
   let uploadUrl = job.upload_url;
   if (!uploadUrl) {
-    uploadUrl = await openSession(job);
+    const { ticket, folders } = await entryFolders(job.media_id);
+    const session = await openSession(job, folders);
+    uploadUrl = session.uploadUrl;
+    // Remember the entry's folder and put its link in the Google Sheet row.
+    if (ticket && session.folderUrl && ticket.drive_folder_url !== session.folderUrl) {
+      await run('UPDATE tickets SET drive_folder_url = $1 WHERE id = $2', [session.folderUrl, ticket.id]);
+      await require('./sheets').syncTicketToSheet(ticket.id).catch((err) => console.error('[drive] sheet link:', err.message));
+    }
     await run('UPDATE drive_jobs SET upload_url = $1, status = $2, updated_at = $3 WHERE id = $4', [uploadUrl, 'uploading', now(), job.id]);
   }
   for (let n = job.next_chunk; n < job.chunks; n++) {
@@ -103,13 +122,34 @@ async function advanceJob(job, deadline) {
 }
 
 // Works through queued jobs for up to `budgetMs`. Jobs that fail 8 times stop retrying.
+// A lease in `meta` keeps two runs (after a submission, and the 5-minute tick) from sending the same file twice.
+const LEASE_MS = 90_000;
+const takeLease = async () => {
+  const ts = Date.now();
+  await run("INSERT INTO meta (key, value) VALUES ('drive_lease', '0') ON CONFLICT (key) DO NOTHING");
+  const got = await one("UPDATE meta SET value = $1 WHERE key = 'drive_lease' AND value::double precision < $2 RETURNING key", [String(ts + LEASE_MS), ts]);
+  return Boolean(got);
+};
+const renewLease = () => run("UPDATE meta SET value = $1 WHERE key = 'drive_lease'", [String(Date.now() + LEASE_MS)]);
+const dropLease = () => run("UPDATE meta SET value = '0' WHERE key = 'drive_lease'");
+
 async function processDriveJobs(budgetMs = 5000) {
   if (!driveEnabled()) return { enabled: false };
+  if (!(await takeLease())) return { enabled: true, busy: true, processed: 0, done: 0 };
+  try {
+    return await runJobs(budgetMs);
+  } finally {
+    await dropLease();
+  }
+}
+
+async function runJobs(budgetMs) {
   const deadline = Date.now() + budgetMs;
   const jobs = await q("SELECT * FROM drive_jobs WHERE status IN ('pending', 'uploading') AND attempts < 8 ORDER BY id LIMIT 25");
   let done = 0;
   for (const job of jobs) {
     if (Date.now() > deadline) break;
+    await renewLease();
     try {
       if ((await advanceJob(job, deadline)) === 'done') done++;
     } catch (err) {

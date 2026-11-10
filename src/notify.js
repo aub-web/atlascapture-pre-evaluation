@@ -97,7 +97,9 @@ async function notify(userIds, { ticketId, type, message, detail, link }) {
   if (!recipients.length) return;
 
   const url = appLink(link || (ticketId ? `/t/${ticketId}` : '/'));
-  await sendMail({ bcc: recipients, subject: message, text: [message, detail, url && `Open: ${url}`].filter(Boolean).join('\n\n') });
+  // Emails go out in the background (src/later.js), so the action and the bell aren't held up.
+  const mail = { bcc: recipients, subject: message, text: [message, detail, url && `Open: ${url}`].filter(Boolean).join('\n\n') };
+  await require('./later').later({ type: 'mail', mail });
 }
 
 module.exports = { notify, sendMail, verifyMail, mailEnabled, appLink };

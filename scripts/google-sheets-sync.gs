@@ -23,7 +23,7 @@ const DRIVE_FOLDER_ID = 'PASTE_DRIVE_FOLDER_ID_HERE';
 
 const HEADERS = [
   'Ticket', 'Status', 'Project', 'Studio', 'Set Director', 'Assigned SPL', 'Task Name', 'Scene', 'Business Type',
-  'Boundary (m)', 'Round', 'QC Reviewer', 'Latest QC Feedback', 'Submitted Via', 'Submitted At', 'Last Updated', 'Decided At', 'Link',
+  'Boundary (m)', 'Round', 'QC Reviewer', 'Latest QC Feedback', 'Submitted Via', 'Submitted At', 'Last Updated', 'Decided At', 'Link', 'Drive Folder',
 ];
 
 function doPost(e) {
@@ -66,10 +66,28 @@ function sendEmail(data) {
   return reply({ ok: true, sent: recipients.length, quota: MailApp.getRemainingDailyQuota() });
 }
 
-// Opens a Drive "resumable upload session" for one file in the folder and returns its URL.
+// Finds (or creates) the subfolder path under the main folder, e.g. ["Indonesia", "TKT-0001 - Indonesia/Bali - Name"].
+function folderFor(path) {
+  let folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+  const names = [].concat(path || []).map((n) => String(n).trim()).filter(Boolean);
+  if (!names.length) return folder;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000); // two files of one entry arriving together must not create two folders
+  try {
+    names.forEach((name) => {
+      const found = folder.getFoldersByName(name);
+      folder = found.hasNext() ? found.next() : folder.createFolder(name);
+    });
+  } finally {
+    lock.releaseLock();
+  }
+  return folder;
+}
+
+// Opens a Drive "resumable upload session" for one file in the entry's folder and returns its URL.
 // The site then sends the file's bytes straight to that URL; the URL only allows uploading this one file.
 function driveSession(data) {
-  const folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+  const folder = folderFor(data.folders);
   const res = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true', {
     method: 'post',
     contentType: 'application/json; charset=UTF-8',
@@ -86,7 +104,7 @@ function driveSession(data) {
   if (res.getResponseCode() !== 200 || !location) {
     return reply({ ok: false, error: 'Drive session failed: HTTP ' + res.getResponseCode() + ' ' + res.getContentText().slice(0, 200) });
   }
-  return reply({ ok: true, uploadUrl: location });
+  return reply({ ok: true, uploadUrl: location, folderId: folder.getId(), folderUrl: folder.getUrl() });
 }
 
 // Run once from the editor (choose authorizeDrive → Run) to grant the Drive permissions.
@@ -113,7 +131,10 @@ function tabFor(country) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const name = country.replace(/[\[\]*?\/\\:]/g, '').slice(0, 90) || 'Other';
   const sheet = ss.getSheetByName(name) || ss.insertSheet(name);
-  if (sheet.getLastRow() === 0) {
+  // Header row: written on a new tab, and extended when columns are added (e.g. "Drive Folder").
+  const width = sheet.getLastColumn();
+  const current = width ? sheet.getRange(1, 1, 1, width).getValues()[0].map(String) : [];
+  if (sheet.getLastRow() === 0 || current.length < HEADERS.length || HEADERS.some((h, i) => current[i] !== h)) {
     sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold').setBackground('#e8effd');
     sheet.setFrozenRows(1);
   }

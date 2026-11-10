@@ -14,18 +14,8 @@ const storage = require('./storage');
 const { syncTicketToSheet, sheetsEnabled, markTicketDeletedInSheet, loadLastReturn } = require('./sheets');
 const { queueTicketMedia, processDriveJobs, driveStatus, retryFailed, driveEnabled } = require('./drive');
 const { buildManifest, streamZip } = require('./exports');
+const { later } = require('./later');
 
-// Queues Drive copies of a ticket's new media and sends what fits in a few seconds; the rest
-// continues from the scheduled drive-sync function. Never blocks or fails the ticket action.
-async function copyToDrive(ticketId, submissionNo) {
-  if (!driveEnabled()) return;
-  try {
-    await queueTicketMedia(ticketId, submissionNo);
-    await processDriveJobs(3500);
-  } catch (err) {
-    console.error('[drive] queue failed:', err.message);
-  }
-}
 const { HOSTED } = require('./env');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
@@ -232,9 +222,15 @@ const TICKET_SELECT = `
   LEFT JOIN users r ON r.id = t.reviewer_id
   LEFT JOIN studios st ON st.name = t.studio`;
 
-function shapeTicket(t) {
+// Only admins see which QA/QC person reviewed a ticket; everyone else sees "QA/QC Team"
+// (a reviewer still sees their own name).
+const QC_ANON = 'QA/QC Team';
+const hidesReviewer = (viewer, userId) => Boolean(viewer && viewer.role !== 'ADMIN' && userId !== viewer.id);
+
+function shapeTicket(t, viewer) {
   return {
     ...t,
+    reviewer_name: t.reviewer_name && hidesReviewer(viewer, t.reviewer_id) ? QC_ANON : t.reviewer_name,
     status_label: STATUS_LABELS[t.status],
     project_name: getProject(t.project)?.name || t.project,
     setup_checklist: JSON.parse(t.setup_checklist || '{}'),
@@ -271,9 +267,11 @@ async function loadTicket(user, id) {
   return t;
 }
 
-const historyFor = (ticketId) =>
-  q(`SELECT h.*, u.name AS user_name, u.role AS user_role FROM history h LEFT JOIN users u ON u.id = h.user_id
+const historyFor = async (ticketId, viewer) => {
+  const rows = await q(`SELECT h.*, u.name AS user_name, u.role AS user_role FROM history h LEFT JOIN users u ON u.id = h.user_id
      WHERE h.ticket_id = $1 ORDER BY h.id DESC`, [ticketId]);
+  return rows.map((h) => (['QC', 'ADMIN'].includes(h.user_role) && hidesReviewer(viewer, h.user_id) ? { ...h, user_name: QC_ANON } : h));
+};
 
 const logHistory = (c, ticketId, userId, action, comment = null, via = 'app') =>
   c.run('INSERT INTO history (ticket_id, user_id, action, comment, via, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
@@ -625,7 +623,7 @@ app.get('/api/tickets', requireAuth, async (req, res) => {
   const viewer = await viewerFor(req);
   const params = [];
   const rows = await q(`${TICKET_SELECT} WHERE ${visibility(viewer, params)} ORDER BY t.updated_at DESC LIMIT 1000`, params);
-  res.json(rows.map(shapeTicket));
+  res.json(rows.map((t) => shapeTicket(t, viewer)));
 });
 
 // Deletes a ticket with its media, history and notifications (admins only). Stored files are
@@ -684,8 +682,7 @@ async function createTicket(submitter, b, channel) {
     type: 'submitted',
     message: `${code} submitted by ${submitter.name} (${submitter.studio}) is awaiting QC review`,
   });
-  await syncTicketToSheet(ticketId);
-  await copyToDrive(ticketId, 1);
+  await later({ type: 'sheet', ticketId }, { type: 'drive', ticketId, submissionNo: 1 });
   return ticketId;
 }
 
@@ -707,8 +704,7 @@ async function resubmitTicket(t, user, body, channel) {
     message: `${t.code} was resubmitted by ${user.name} (round ${submissionNo})`,
     detail: note,
   });
-  await syncTicketToSheet(t.id);
-  await copyToDrive(t.id, submissionNo);
+  await later({ type: 'sheet', ticketId: t.id }, { type: 'drive', ticketId: t.id, submissionNo });
 }
 
 app.post('/api/tickets', requireAuth, requireRole('SD'), async (req, res) => {
@@ -719,10 +715,10 @@ app.get('/api/tickets/:id', requireAuth, async (req, res) => {
   const t = await loadTicket(req.user, req.params.id);
   const media = await q('SELECT id, submission_no, slot, label, mime, size, duration, original_name, storage_key, archived_at, created_at FROM media WHERE ticket_id = $1 ORDER BY submission_no DESC, id', [t.id]);
   res.json({
-    ticket: shapeTicket(t),
+    ticket: shapeTicket(t, req.user),
     project: getProject(t.project),
     media: media.map(({ storage_key, ...m }) => ({ ...m, url: m.archived_at ? null : mediaUrl(storage_key) })),
-    history: await historyFor(t.id),
+    history: await historyFor(t.id, req.user),
   });
 });
 
@@ -734,7 +730,7 @@ app.post('/api/tickets/:id/start-review', requireAuth, requireRole('QC'), async 
       await c.run("UPDATE tickets SET status = 'reviewing', reviewer_id = $1, updated_at = $2 WHERE id = $3", [req.user.id, now(), t.id]);
       await logHistory(c, t.id, req.user.id, 'review_started');
     });
-    await syncTicketToSheet(t.id);
+    await later({ type: 'sheet', ticketId: t.id });
   }
   res.json({ ok: true });
 });
@@ -762,10 +758,10 @@ app.post('/api/tickets/:id/approve', requireAuth, requireRole('QC', 'ADMIN'), as
   await notify([t.sd_id], {
     ticketId: t.id,
     type: 'approved',
-    message: `${t.code} approved by ${req.user.name}: filming can begin`,
+    message: `${t.code} approved by QA/QC: filming can begin`,
     detail: `Your setup for "${t.task_name}" (${t.scene}) passed QC. You have the green light to start the recording session.`,
   });
-  await syncTicketToSheet(t.id);
+  await later({ type: 'sheet', ticketId: t.id });
   res.json({ ok: true });
 });
 
@@ -788,7 +784,7 @@ app.post('/api/tickets/:id/return', requireAuth, requireRole('QC', 'ADMIN'), asy
   await notify([t.sd_id], {
     ticketId: t.id,
     type: 'returned',
-    message: `${t.code} returned by ${req.user.name}: fixes needed before filming`,
+    message: `${t.code} returned by QA/QC: fixes needed before filming`,
     detail: comment,
   });
   await notify([t.spl_id], {
@@ -797,7 +793,7 @@ app.post('/api/tickets/:id/return', requireAuth, requireRole('QC', 'ADMIN'), asy
     message: `${t.code} (${t.sd_name}) was returned by QC and needs corrections`,
     detail: comment,
   });
-  await syncTicketToSheet(t.id);
+  await later({ type: 'sheet', ticketId: t.id });
   res.json({ ok: true });
 });
 
