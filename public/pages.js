@@ -228,8 +228,10 @@ function openStudioDialog(s, editing, done) {
   }, editing ? 'Save' : 'Add studio');
 }
 
+const TEAM_ROLES = ['SD', 'SPC', 'SPL', 'QC', 'ADMIN'];
+
 function openMemberDialog(u, done) {
-  const roles = ['SD', 'SPC', 'SPL', 'QC', 'ADMIN'];
+  const roles = TEAM_ROLES;
   openModal(`Edit ${u.name}`, `
     <label class="field"><span>Full name <em>*</em></span><input type="text" name="name" value="${esc(u.name)}"></label>
     <label class="field"><span>Email</span><input type="text" name="email" inputmode="email" value="${esc(u.email || '')}"></label>
@@ -398,15 +400,48 @@ async function renderTeam(view) {
         <td><b>${esc(u.name)}</b>${u.source !== 'roster' ? ' <span class="via-tag">Added</span>' : ''}${u.active ? '' : ' <span class="via-tag">Inactive</span>'}
           ${u.title ? `<div class="sub">${esc(u.title)}</div>` : ''}
           <div class="sub email">${u.email ? esc(u.email) : '<span class="faint">No email</span>'}</div></td>
-        <td>${esc(ROLE_NAMES[u.role])}</td>
+        <td>${isAdmin && u.id !== me.id
+          ? `<select class="role-select" data-role="${u.id}" aria-label="Role for ${esc(u.name)}">${TEAM_ROLES.map((r) => `<option value="${r}" ${r === u.role ? 'selected' : ''}>${esc(ROLE_NAMES[r])}</option>`).join('')}</select>`
+          : esc(ROLE_NAMES[u.role])}</td>
         <td class="hide-sm">${esc(u.studio || '—')}</td>
         <td class="signin-cell">${signIn(u)}</td>
-        <td style="text-align:right;white-space:nowrap">${isAdmin && u.id !== me.id ? `<button class="btn btn-ghost small" data-edit="${u.id}">Edit</button>` : ''}${u.source !== 'roster' && u.can_manage && u.id !== me.id ? `<button class="btn btn-ghost small" data-toggle="${u.id}" data-active="${u.active ? 0 : 1}">${u.active ? 'Deactivate' : 'Reactivate'}</button>` : ''}</td>
+        <td class="member-actions"><div class="member-actions-stack">${isAdmin && u.id !== me.id ? `<button class="btn btn-ghost small" data-edit="${u.id}">Edit</button>` : ''}${(isAdmin || (u.source !== 'roster' && u.can_manage)) && u.id !== me.id ? `<button class="btn btn-ghost small" data-toggle="${u.id}" data-active="${u.active ? 0 : 1}">${u.active ? 'Deactivate' : 'Reactivate'}</button>` : ''}${isAdmin && u.id !== me.id ? `<button class="btn btn-ghost small danger-text" data-delete="${u.id}">Delete</button>` : ''}</div></td>
       </tr>`).join('')}</tbody></table></div>` : '<div class="empty">No one matches.</div>';
   };
   draw();
   $('.search', list).oninput = (e) => { q = e.target.value; draw(); };
+  // Admins: change someone's role straight from the table.
+  list.onchange = async (e) => {
+    const sel = e.target.closest('[data-role]');
+    if (!sel) return;
+    const u = users.find((x) => x.id === Number(sel.dataset.role));
+    const role = sel.value;
+    if (['SD', 'SPC', 'SPL'].includes(role) && !u.studio) { // needs a studio: pick it in the full editor
+      sel.value = u.role;
+      return openMemberDialog({ ...u, role }, () => renderTeam(view));
+    }
+    try {
+      await api(`/api/team/${u.id}`, { method: 'PATCH', body: { role } });
+      toast(`${u.name} is now ${ROLE_NAMES[role]}`);
+      renderTeam(view);
+    } catch (err) {
+      sel.value = u.role;
+      toast(err.message, 'error');
+    }
+  };
   list.onclick = async (e) => {
+    const del = e.target.closest('[data-delete]');
+    if (del) {
+      const u = users.find((x) => x.id === Number(del.dataset.delete));
+      return openModal(`Delete ${u.name}?`, `
+        <p style="margin:0">This permanently removes <b>${esc(u.name)}</b>${u.email ? ` (${esc(u.email)})` : ''} from the team. It can't be undone.</p>
+        <p class="muted small" style="margin:0">People who already submitted, led or reviewed tickets can't be deleted, because the ticket history keeps their name. Use <b>Deactivate</b> for them: they can no longer sign in.</p>`,
+      async () => {
+        await api(`/api/team/${u.id}`, { method: 'DELETE' });
+        toast(`${u.name} deleted`);
+        renderTeam(view);
+      }, 'Delete member', (form) => { $('[type="submit"]', form).className = 'btn btn-danger solid'; });
+    }
     const edit = e.target.closest('[data-edit]');
     if (edit) return openMemberDialog(users.find((x) => x.id === Number(edit.dataset.edit)), () => renderTeam(view));
     const login = e.target.closest('[data-login]');
@@ -422,7 +457,10 @@ async function renderTeam(view) {
     const btn = e.target.closest('[data-toggle]');
     if (!btn) return;
     try {
-      await api(`/api/team/${btn.dataset.toggle}`, { method: 'PATCH', body: { active: btn.dataset.active === '1' } });
+      const on = btn.dataset.active === '1';
+      await api(`/api/team/${btn.dataset.toggle}`, { method: 'PATCH', body: { active: on } });
+      const u = users.find((x) => x.id === Number(btn.dataset.toggle));
+      toast(on ? `${u.name} reactivated` : `${u.name} deactivated: they can't sign in any more`);
       renderTeam(view);
     } catch (err) {
       toast(err.message, 'error');

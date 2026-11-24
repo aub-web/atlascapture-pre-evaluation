@@ -905,8 +905,40 @@ app.patch('/api/team/:id', requireAuth, requireRole('ADMIN', 'SPL'), async (req,
       [role, studio, name, email, title, target.id]);
     return res.json({ ok: true });
   }
-  if (target.source === 'roster') throw new HttpError(409, 'People from the roster are managed by re-importing the roster');
-  await run('UPDATE users SET active = $1 WHERE id = $2', [req.body?.active ? 1 : 0, target.id]);
+  // Deactivate / reactivate. Admins can do this for anyone (roster people then become app-managed,
+  // so a later roster import doesn't undo it); SPLs only for people they added.
+  if (target.source === 'roster' && req.user.role !== 'ADMIN') throw new HttpError(409, 'Ask an admin to deactivate people from the roster');
+  const active = req.body?.active ? 1 : 0;
+  if (!active) await keepOneAdmin(target);
+  await run("UPDATE users SET active = $1, source = CASE WHEN source = 'roster' THEN 'manual' ELSE source END WHERE id = $2", [active, target.id]);
+  res.json({ ok: true });
+});
+
+// There must always be at least one active admin left.
+async function keepOneAdmin(target) {
+  if (target.role !== 'ADMIN') return;
+  const others = await one("SELECT COUNT(*)::int AS n FROM users WHERE role = 'ADMIN' AND active = 1 AND id <> $1", [target.id]);
+  if (!others.n) throw new HttpError(409, 'This is the last active admin. Make someone else an admin first.');
+}
+
+// Deletes a member (admins only). People who submitted, led or reviewed tickets stay in those
+// tickets' history, so they can only be deactivated, not deleted.
+app.delete('/api/team/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  const target = await one('SELECT * FROM users WHERE id = $1', [Number(req.params.id) || 0]);
+  if (!target) throw new HttpError(404, 'User not found');
+  if (target.id === req.user.id) throw new HttpError(409, "You can't delete yourself");
+  await keepOneAdmin(target);
+  const used = await one(`SELECT
+      (SELECT COUNT(*)::int FROM tickets WHERE sd_id = $1 OR spl_id = $1 OR reviewer_id = $1) AS tickets,
+      (SELECT COUNT(*)::int FROM history WHERE user_id = $1) AS actions`, [target.id]);
+  if (used.tickets || used.actions) {
+    throw new HttpError(409, `${target.name} is on ${used.tickets || used.actions} ticket record${(used.tickets || used.actions) === 1 ? '' : 's'}, so they can't be deleted (the history must keep their name). Deactivate them instead: they won't be able to sign in.`);
+  }
+  await tx(async (c) => {
+    await c.run('DELETE FROM notifications WHERE user_id = $1', [target.id]);
+    if (target.email) await c.run('DELETE FROM login_codes WHERE lower(email) = lower($1)', [target.email]);
+    await c.run('DELETE FROM users WHERE id = $1', [target.id]);
+  });
   res.json({ ok: true });
 });
 
